@@ -1,0 +1,17 @@
+/build/
+/.claude/
+/py_test/
+/SIFT-1M/
+/siftsmall/
+*.vsg
+*.pcb
+*.log
+*.tmp
+
+# Python caches
+__pycache__/
+*.pyc
+
+# IDE files
+.vscode/
+.idea/

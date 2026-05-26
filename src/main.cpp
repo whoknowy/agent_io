@@ -14,9 +14,15 @@
 #include "dataset/ivecs.h"
 #include "index/graph_builder.h"
 #include "index/graph_search.h"
+<<<<<<< HEAD
 #include "io/backend_factory.h"
 #include "io/cached_io.h"
 #include "io/prefetch_scheduler.h"
+=======
+#include "io/cached_io.h"
+#include "io/prefetch_scheduler.h"
+#include "io/sync_io.h"
+>>>>>>> 500ef092e647c8152098a19ff41d5e15edd92f10
 #include "mem/memtable.h"
 #include "pq/pq_codec.h"
 #include "pq/pq_trainer.h"
@@ -61,8 +67,14 @@ bool LoadSegments(const vindex::Manifest& manifest,
   for (const auto& meta : manifest.segments()) {
     vindex::SegmentReader reader;
     if (cache) {
+<<<<<<< HEAD
       auto cached_io = std::make_unique<vindex::CachedIOBackend>(
           vindex::MakeDefaultIOBackend(), cache);
+=======
+      auto sync_io = std::make_unique<vindex::SyncIOBackend>();
+      auto cached_io = std::make_unique<vindex::CachedIOBackend>(
+          std::move(sync_io), cache);
+>>>>>>> 500ef092e647c8152098a19ff41d5e15edd92f10
       if (!reader.OpenWithIO(meta.path, meta.id_offset, std::move(cached_io))) {
         std::cerr << "Failed to open segment: " << meta.path << "\n";
         return false;

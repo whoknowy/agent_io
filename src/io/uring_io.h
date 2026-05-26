@@ -42,7 +42,10 @@ class UringIOBackend : public IIOBackend {
   int fd_ = -1;
   size_t queue_depth_;
   bool sqpoll_;
+<<<<<<< HEAD
   bool ring_init_ = false;
+=======
+>>>>>>> 500ef092e647c8152098a19ff41d5e15edd92f10
   io_uring* ring_ = nullptr;
 };
 

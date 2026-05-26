@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cstring>
+<<<<<<< HEAD
 #include <mutex>
+=======
+>>>>>>> 500ef092e647c8152098a19ff41d5e15edd92f10
 
 namespace vindex {
 

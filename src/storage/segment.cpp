@@ -3,7 +3,11 @@
 #include <cstring>
 #include <vector>
 
+<<<<<<< HEAD
 #include "io/backend_factory.h"
+=======
+#include "io/sync_io.h"
+>>>>>>> 500ef092e647c8152098a19ff41d5e15edd92f10
 #include "pq/pq_codec.h"
 
 namespace vindex {
@@ -40,7 +44,11 @@ uint64_t ReadU64(const std::vector<uint8_t>& buf, size_t& offset) {
 }  // namespace
 
 bool SegmentReader::Open(const std::string& path, uint64_t id_offset) {
+<<<<<<< HEAD
   return OpenWithIO(path, id_offset, MakeDefaultIOBackend());
+=======
+  return OpenWithIO(path, id_offset, std::make_unique<SyncIOBackend>());
+>>>>>>> 500ef092e647c8152098a19ff41d5e15edd92f10
 }
 
 bool SegmentReader::OpenWithIO(const std::string& path, uint64_t id_offset,

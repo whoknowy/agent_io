@@ -40,8 +40,17 @@ bool UringIOBackend::Open(const std::string& path) {
     close(fd_);
     fd_ = -1;
   }
+<<<<<<< HEAD
   fd_ = open(path_.c_str(), O_RDONLY);
   return fd_ >= 0 && ring_init_;
+=======
+  fd_ = open(path_.c_str(), O_RDONLY | O_DIRECT);
+  if (fd_ < 0) {
+    // Fall back to buffered I/O if O_DIRECT is not supported.
+    fd_ = open(path_.c_str(), O_RDONLY);
+  }
+  return fd_ >= 0;
+>>>>>>> 500ef092e647c8152098a19ff41d5e15edd92f10
 }
 
 bool UringIOBackend::IsOpen() const {
