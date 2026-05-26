@@ -1,0 +1,189 @@
+#include "storage/compaction.h"
+
+#include <algorithm>
+#include <filesystem>
+#include <iostream>
+#include <map>
+
+#include "dataset/fvecs.h"
+#include "index/graph_builder.h"
+#include "storage/manifest.h"
+#include "storage/segment.h"
+
+namespace vindex {
+
+static constexpr uint32_t kMaxLevel0Segments = 4;
+static constexpr uint32_t kMaxLevelNSegments = 2;
+
+CompactionScheduler::CompactionScheduler(const std::string& manifest_path,
+                                         const std::string& data_dir,
+                                         uint32_t dim)
+    : manifest_path_(manifest_path), data_dir_(data_dir), dim_(dim),
+      worker_(&CompactionScheduler::WorkerLoop, this) {}
+
+CompactionScheduler::~CompactionScheduler() {
+  stop_.store(true);
+  cv_.notify_all();
+  if (worker_.joinable()) {
+    worker_.join();
+  }
+}
+
+void CompactionScheduler::ScheduleCheck() {
+  pending_.store(true);
+  cv_.notify_one();
+}
+
+void CompactionScheduler::Pause() {
+  paused_.store(true);
+}
+
+void CompactionScheduler::Resume() {
+  paused_.store(false);
+  cv_.notify_one();
+}
+
+void CompactionScheduler::WaitIdle() {
+  while (pending_.load()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+}
+
+void CompactionScheduler::WorkerLoop() {
+  while (!stop_.load()) {
+    {
+      std::unique_lock lock(mutex_);
+      cv_.wait(lock, [this] {
+        return pending_.load() || stop_.load();
+      });
+    }
+
+    if (stop_.load()) break;
+    if (paused_.load()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      continue;
+    }
+
+    pending_.store(false);
+
+    Manifest manifest;
+    if (!manifest.Load(manifest_path_)) continue;
+
+    bool did_work = false;
+
+    // Group segments by level.
+    std::map<uint32_t, std::vector<SegmentMeta>> by_level;
+    for (const auto& seg : manifest.segments()) {
+      by_level[seg.level].push_back(seg);
+    }
+
+    for (auto& [level, segs] : by_level) {
+      uint32_t max_allowed = (level == 0) ? kMaxLevel0Segments : kMaxLevelNSegments;
+      if (segs.size() > max_allowed) {
+        if (CompactLevel(level, manifest)) {
+          did_work = true;
+          break;  // One compaction per check.
+        }
+      }
+    }
+
+    if (did_work) {
+      compaction_count_.fetch_add(1);
+      // Re-check in case cascading compactions are needed.
+      pending_.store(true);
+      cv_.notify_one();
+    }
+  }
+}
+
+bool CompactionScheduler::CompactLevel(uint32_t level, Manifest& manifest) {
+  if (callback_) {
+    callback_("Compacting level " + std::to_string(level));
+  }
+
+  // Collect segments at this level.
+  std::vector<SegmentMeta> source_metas;
+  for (const auto& seg : manifest.segments()) {
+    if (seg.level == level) {
+      source_metas.push_back(seg);
+    }
+  }
+
+  if (source_metas.empty()) return false;
+
+  // Read all vectors from source segments.
+  std::vector<float> all_vectors;
+  uint64_t total_count = 0;
+
+  for (const auto& meta : source_metas) {
+    SegmentReader reader;
+    if (!reader.Open(meta.path, meta.id_offset)) {
+      if (callback_) {
+        callback_("Failed to open segment: " + meta.path);
+      }
+      return false;
+    }
+
+    for (uint64_t i = 0; i < reader.count(); ++i) {
+      std::vector<float> vec;
+      std::vector<uint32_t> neighbors;
+      if (!reader.ReadNode(static_cast<uint32_t>(i), vec, neighbors)) {
+        return false;
+      }
+      all_vectors.insert(all_vectors.end(), vec.begin(), vec.end());
+    }
+    total_count += reader.count();
+  }
+
+  if (total_count == 0) return false;
+
+  // Rebuild KNN graph.
+  GraphBuildConfig cfg;
+  cfg.degree = degree_;
+  std::vector<std::vector<VectorId>> new_neighbors;
+  if (!BuildKnnGraph(all_vectors, dim_, cfg, new_neighbors)) {
+    return false;
+  }
+
+  // Write new segment at next level.
+  uint64_t new_offset = source_metas.front().id_offset;
+  std::string new_path = data_dir_ + "/segment_L" +
+                         std::to_string(level + 1) + "_" +
+                         std::to_string(compaction_count_.load()) + ".vsg";
+
+  if (!SegmentWriter::WriteSegment(new_path, dim_, total_count, degree_,
+                                   0, all_vectors, new_neighbors)) {
+    return false;
+  }
+
+  // Update manifest: remove old segments, add new one.
+  for (const auto& meta : source_metas) {
+    manifest.Remove(meta.path);
+  }
+
+  SegmentMeta new_meta;
+  new_meta.path = new_path;
+  new_meta.id_offset = new_offset;
+  new_meta.level = level + 1;
+  manifest.Add(new_meta);
+
+  if (!manifest.Save(manifest_path_)) {
+    return false;
+  }
+
+  // Delete old segment files.
+  for (const auto& meta : source_metas) {
+    std::error_code ec;
+    std::filesystem::remove(meta.path, ec);
+  }
+
+  if (callback_) {
+    callback_("Compacted " + std::to_string(source_metas.size()) +
+              " segments (level " + std::to_string(level) +
+              ") into " + new_path);
+  }
+
+  return true;
+}
+
+}  // namespace vindex
