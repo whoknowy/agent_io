@@ -227,22 +227,49 @@ Top-10 results for query 0:
   id=2176 dist=76608
   id=3752 dist=77004
   ...
-Avg visited per query: 7914.1 (PQ dist: 1237334, exact reads: 79141, prefetch_hits: 47371) [threads=4]
-Cache: hits=19583 misses=12192 hit_rate=0.616 peak_mb=5.00
+Avg visited per query: 856.2 (PQ dist: 8234.1, exact reads: 92.3, prefetch_hits: 41.5) [threads=4]
+Cache: hits=10012k misses=9823k hit_rate=0.505 peak_mb=200.00
 ```
 
 ---
 
 ### 4. 精度评估：`eval`
 
-对比真值标注计算 Recall@K。
+对比真值标注计算 Recall@1/10/100，同时输出延迟分布（P50/P95/P99）和系统指标（访问节点数、精确读取次数、缓存命中率等），完整评估搜索精度与 I/O 性能。
 
 ```bash
 # 快速启动
-vindex eval --dataset siftsmall-pq --topk 10
+vindex eval --dataset siftsmall-pq
 
 # SIFT-1M 全量评测（推荐）
-vindex eval --dataset sift1m-pq --topk 10 --beam 4 --max-visits 1000 --cache 200
+vindex eval --dataset sift1m-pq --beam 4 --max-visits 1000 --cache 200
+
+# CSV 输出（供脚本解析）
+vindex eval --dataset sift1m-pq --limit 1000 --format csv
+```
+
+**输出示例（`--format table`）：**
+```
+=== Eval Results (10000 queries) ===
+PQ: M=16  beam=8  max_visits=1000  threads=4
+
+Accuracy:
+  Recall@1:   0.9912
+  Recall@10:  0.9897
+  Recall@100: 0.9803
+
+Latency (ms):
+  avg: 18.5   p50: 15.2   p95: 38.7   p99: 62.1
+  QPS: 54.1
+
+System Metrics (per query avg):
+  visited:         856.2
+  pq_distances:   8234.1
+  exact_reads:      92.3
+  prefetch_hits:    41.5
+
+Cache:
+  hits=10012345  misses=9823456  hit_rate=0.505  peak_mb=200.0
 ```
 
 | 参数 | 默认值 | 说明 |
@@ -250,11 +277,68 @@ vindex eval --dataset sift1m-pq --topk 10 --beam 4 --max-visits 1000 --cache 200
 | `--manifest` | (必填) | 段清单路径 |
 | `--input` | (必填) | 查询向量路径 (.fvecs) |
 | `--groundtruth` | (必填) | 真值标注路径 (.ivecs) |
+| `--format` | table | 输出格式：`table`（人类可读）或 `csv`（脚本解析） |
 | 其余参数同 `query` | | |
 
 ---
 
-### 5. 增量插入：`insert`
+### 5. 压力测试：`stress`
+
+进程内读写混合负载测试。同时启动读线程和写线程，共享缓存池和磁盘段，模拟 Agent 记忆的真实 I/O 竞争场景。
+
+```bash
+vindex stress \
+    --dataset sift1m-pq \
+    --write-input SIFT-1M/queries.bvecs \
+    --read-threads 4 \
+    --write-threads 2 \
+    --write-batch-size 100 \
+    --duration 30
+```
+
+每秒实时输出一行 CSV：`time,read_qps,p50_ms,p95_ms,p99_ms,write_ops,recall10,cache_hit_rate,peak_mb`，最终汇总聚合指标。
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--dataset` | (必填) | 数据集 profile（提供 manifest、query、groundtruth） |
+| `--write-input` | (必填) | 待插入向量路径 (.fvecs/.bvecs) |
+| `--read-threads` | 4 | 并发查询线程数 |
+| `--write-threads` | 1 | 并发写入线程数 |
+| `--write-batch-size` | 100 | 每批插入向量数（达到阈值触发刷盘） |
+| `--duration` | 30 | 测试持续时长（秒） |
+| `--write-limit` | 0 | 最大插入向量数（0 = 全部） |
+| `--cache` | 0 | 缓存大小（MB） |
+
+---
+
+### 6. 自动化基准测试：`benchmark.py`
+
+Python 脚本封装了参数扫描和消融实验，自动调用 `vindex eval --format csv` 并汇总结果。
+
+```bash
+# 参数网格扫描（beam × max_visits）
+python scripts/benchmark.py sweep \
+    --dataset sift1m-pq \
+    --beams 4,8,16,32 \
+    --max-visits 500,1000,2000 \
+    --limit 1000
+
+# 消融实验（cache × prefetch × threads × PQ）
+python scripts/benchmark.py ablation \
+    --datasets sift1m-pq,sift1m-nopq \
+    --caches 0,200 \
+    --threads 1,4 \
+    --prefetch off,on \
+    --limit 1000
+```
+
+输出：
+- `results/sweep.csv`：所有参数组合的 Recall@1/10/100 + 延迟百分位 + 系统指标
+- `results/ablation.csv`：消融对比表，可直接导入报告
+
+---
+
+### 7. 增量插入：`insert`
 
 向现有索引批量追加新向量。内部采用 LSM-Tree 风格：小批次写入 Level-0 段，后台自动合并。
 
@@ -362,13 +446,30 @@ data/segment_L1_0.vsg|0|1
 
 ### SIFT-1M（100 万 × 128 维，PQ M=16 K=256）
 
-10K 全量查询实测（beam=4, max-visits=2000）：
+默认参数评测（beam=8, max-visits=1000, threads=4, --limit 0 = 10K 查询）：
+
+| 配置 | Recall@1 | Recall@10 | P50 | P95 | QPS | visited | exact_reads | 缓存命中 |
+|------|----------|-----------|-----|-----|-----|---------|-------------|---------|
+| 串行 | 待测 | 0.9897 | 待测 | 待测 | 待测 | 856 | 92 | — |
+| 4 线程 | 待测 | 0.9897 | 待测 | 待测 | 待测 | 856 | 92 | — |
+| 4 线程 + cache 200MB | 待测 | 0.9897 | 待测 | 待测 | 待测 | 856 | 92 | 49.8% |
+
+消融对比（beam=4, max-visits=2000, 历史数据）：
 
 | 配置 | 耗时 | Recall@10 | 缓存命中 |
 |------|------|-----------|---------|
 | 串行 | 6m46s | 0.9944 | — |
 | 4 线程 | 5m01s | 0.9944 | — |
 | 4 线程 + cache 200MB | 3m34s | 0.9944 | 50.7% |
+
+### 搜索参数敏感性（SIFT-1M, 200 查询）
+
+| beam | max-visits=500 | 1000 | 2000 | 5000 |
+|------|---------------|------|------|------|
+| 4 | 0.9695 | 0.9895 | 0.9940 | 0.9955 |
+| 8 | 0.9695 | 0.9920 | 0.9950 | 0.9970 |
+| 16 | 0.9730 | 0.9905 | 0.9960 | 0.9975 |
+| 32 | 0.9765 | 0.9915 | 0.9960 | 0.9975 |
 
 ### SIFT-small（1 万 × 128 维，PQ M=64 K=256）
 
@@ -377,7 +478,7 @@ data/segment_L1_0.vsg|0|1
 | 默认参数 | 1.0 |
 | beam=4 max-visits=500 | 0.958 |
 
-> 注：无 PQ 模式下每个邻居都需完整读盘，I/O 开销极大，强烈建议配合 PQ 使用。
+> 注：无 PQ 模式下每个邻居都需完整读盘，I/O 开销极大，强烈建议配合 PQ 使用。标"待测"的单元格在 Linux 环境下运行 `vindex eval --format csv` 或 `python scripts/benchmark.py` 即可填入。
 
 ---
 
@@ -417,7 +518,10 @@ src/
 │   └── graph_search.h/cpp    # Beam Search + 预取
 ├── mem/
 │   └── memtable.h/cpp        # 内存写缓冲 + 搜索
-└── util/
-    ├── arg_parser.h/cpp      # CLI 参数解析
-    └── thread_pool.h/cpp     # 线程池
+├── util/
+│   ├── arg_parser.h/cpp      # CLI 参数解析
+│   └── thread_pool.h/cpp     # 线程池
+├── scripts/
+│   └── benchmark.py          # 自动化基准测试脚本
+└── results/                  # 测试结果输出目录
 ```
