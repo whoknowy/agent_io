@@ -306,6 +306,7 @@ void ArgParser::PrintHelp(const std::string& subcommand) {
               << "  query      Search the index for nearest neighbors\n"
               << "  eval       Evaluate recall against ground truth\n"
               << "  insert     Insert new vectors into an existing index\n"
+              << "  stress     Mixed read-write stress test\n"
               << "  train-pq   Train a Product Quantization codebook\n\n"
               << "Global options:\n"
               << "  --config <path>    Load parameters from a JSON config file\n"
@@ -367,6 +368,7 @@ void ArgParser::PrintHelp(const std::string& subcommand) {
               << "  --cache <int>          Cache size in MB, 0 = disabled (default: 0)\n"
               << "  --prefetch             Enable topology-aware async I/O prefetch\n"
               << "  --threads <int>        Number of parallel query threads (default: 4)\n"
+              << "  --format <csv|table>   Output format: csv for scripts, table (default)\n"
               << "  --help                 Show this help text\n";
     return;
   }
@@ -386,6 +388,24 @@ void ArgParser::PrintHelp(const std::string& subcommand) {
               << "  --build-beam <int>     Beam width during graph construction (default: 64)\n"
               << "  --alpha <float>        Vamana pruning parameter (default: 1.2)\n"
               << "  --max-build-visits <int>  Max nodes visited during build (default: 5000)\n"
+              << "  --help                 Show this help text\n";
+    return;
+  }
+
+  if (subcommand == "stress") {
+    std::cout << "Usage: vindex stress --dataset <name> --write-input <fvecs> [options]\n\n"
+              << "Mixed read-write stress test. Runs concurrent query and insert threads.\n\n"
+              << "Required:\n"
+              << "  --dataset <name>       Dataset profile (provides manifest, query, groundtruth)\n"
+              << "  --write-input <path>   Vectors to insert during stress test (.fvecs/.bvecs)\n\n"
+              << "Options:\n"
+              << "  --read-threads <int>   Number of concurrent query threads (default: 4)\n"
+              << "  --write-threads <int>  Number of concurrent insert threads (default: 1)\n"
+              << "  --write-batch-size <int>  Vectors per insert batch before flush (default: 100)\n"
+              << "  --duration <int>       Test duration in seconds (default: 30)\n"
+              << "  --cache <int>          Cache size in MB, 0 = disabled (default: 0)\n"
+              << "  --beam <int>           Beam width for search (default: 8)\n"
+              << "  --max-visits <int>     Max nodes to visit per search (default: 1000)\n"
               << "  --help                 Show this help text\n";
     return;
   }
