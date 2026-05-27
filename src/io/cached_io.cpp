@@ -17,17 +17,21 @@ bool CachedIOBackend::IsOpen() const {
 }
 
 bool CachedIOBackend::ReadAt(uint64_t offset, void* buf, size_t size) {
+  // Fast path: cache lookup.
   if (cache_) {
     if (cache_->Get(backend_->path(), offset, size, buf)) {
       return true;
     }
   }
 
+  // Cache miss — read from disk.
   if (!backend_->ReadAt(offset, buf, size)) {
     return false;
   }
 
-  if (cache_) {
+  // Only backfill if there's room and we're below 90% capacity.
+  // Avoids unique_lock contention when cache is nearly full.
+  if (cache_ && cache_->HasRoom()) {
     cache_->PutIfRoom(backend_->path(), offset, buf, size);
   }
 

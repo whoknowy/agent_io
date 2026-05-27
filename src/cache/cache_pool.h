@@ -38,6 +38,9 @@ class CachePool {
   const CacheStats& stats() const { return stats_; }
   size_t watermark() const { return watermark_; }
 
+  // Fast check: true if < 90% full, the common case where caching is cheap.
+  bool HasRoom() const { return stats_.current_memory < watermark_ * 9 / 10; }
+
  private:
   struct Key {
     std::string segment_path;
