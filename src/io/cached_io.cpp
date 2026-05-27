@@ -28,7 +28,7 @@ bool CachedIOBackend::ReadAt(uint64_t offset, void* buf, size_t size) {
   }
 
   if (cache_) {
-    cache_->Put(backend_->path(), offset, buf, size, /*is_metadata=*/false);
+    cache_->PutIfRoom(backend_->path(), offset, buf, size);
   }
 
   return true;

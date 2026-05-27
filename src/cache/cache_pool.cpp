@@ -2,10 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
-<<<<<<< HEAD
 #include <mutex>
-=======
->>>>>>> 500ef092e647c8152098a19ff41d5e15edd92f10
 
 namespace vindex {
 
@@ -114,23 +111,20 @@ uint32_t CachePool::ComputeWeight(const CacheEntry& entry) const {
 }
 
 void CachePool::EvictToWatermark() {
-  // Collect entries sorted by weight ascending (evict smallest first).
-  std::vector<std::pair<Key, uint32_t>> weighted;
-  weighted.reserve(cache_.size());
-  for (const auto& [k, v] : cache_) {
-    weighted.emplace_back(k, ComputeWeight(v));
-  }
-  std::sort(weighted.begin(), weighted.end(),
-            [](const auto& a, const auto& b) { return a.second < b.second; });
-
-  for (const auto& [k, weight] : weighted) {
-    if (stats_.current_memory <= watermark_) break;
-    auto it = cache_.find(k);
-    if (it != cache_.end()) {
-      stats_.current_memory -= it->second.Size();
-      cache_.erase(it);
-      ++stats_.evictions;
+  while (stats_.current_memory > watermark_ && !cache_.empty()) {
+    // Find the single lowest-weight entry — O(N) instead of O(N log N).
+    auto min_it = cache_.begin();
+    uint32_t min_weight = ComputeWeight(min_it->second);
+    for (auto it = cache_.begin(); it != cache_.end(); ++it) {
+      uint32_t w = ComputeWeight(it->second);
+      if (w < min_weight) {
+        min_weight = w;
+        min_it = it;
+      }
     }
+    stats_.current_memory -= min_it->second.Size();
+    cache_.erase(min_it);
+    ++stats_.evictions;
   }
 }
 

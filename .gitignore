@@ -3,11 +3,12 @@
 /py_test/
 /SIFT-1M/
 /siftsmall/
+/data*/
 *.vsg
 *.pcb
 *.log
 *.tmp
-
+*.exe
 # Python caches
 __pycache__/
 *.pyc

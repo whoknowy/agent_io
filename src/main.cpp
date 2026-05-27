@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <future>
 #include <iostream>
@@ -11,18 +12,13 @@
 #include "core/distance.h"
 #include "core/topk.h"
 #include "dataset/fvecs.h"
+#include "dataset/bvecs.h"
 #include "dataset/ivecs.h"
 #include "index/graph_builder.h"
 #include "index/graph_search.h"
-<<<<<<< HEAD
 #include "io/backend_factory.h"
 #include "io/cached_io.h"
 #include "io/prefetch_scheduler.h"
-=======
-#include "io/cached_io.h"
-#include "io/prefetch_scheduler.h"
-#include "io/sync_io.h"
->>>>>>> 500ef092e647c8152098a19ff41d5e15edd92f10
 #include "mem/memtable.h"
 #include "pq/pq_codec.h"
 #include "pq/pq_trainer.h"
@@ -34,19 +30,30 @@
 
 namespace {
 
-void PrintUsage() {
-  std::cout << "Usage:\n"
-            << "  vindex build --base <fvecs> --out_dir <dir> [--degree 32] [--codebook <pcb>] [--limit N] [--builder brute|vamana|auto]\n"
-            << "  vindex query --manifest <file> --query <fvecs> [--topk 10] [--beam 32]"
-            << " [--max_visits 10000] [--limit N] [--cache_mb N] [--no_cache] [--prefetch]"
-            << " [--threads N]\n"
-            << "  vindex eval --manifest <file> --query <fvecs> --groundtruth <ivecs>"
-            << " [--topk 10] [--beam 32] [--max_visits 10000] [--limit N]"
-            << " [--cache_mb N] [--no_cache] [--prefetch] [--threads N]\n"
-            << "  vindex insert --manifest <file> --input <fvecs> --out_dir <dir>"
-            << " [--degree 32] [--flush N]\n"
-            << "  vindex train-pq --input <fvecs> --out <codebook> [--M 64] [--K 256]"
-            << " [--limit 100000] [--iters 25]\n";
+void CheckUnknownArgs(const vindex::ArgParser& args) {
+  auto unknown = args.GetUnknownKeys();
+  if (!unknown.empty()) {
+    std::cerr << "Warning: unknown parameter(s):";
+    for (const auto& k : unknown) {
+      std::cerr << " --" << k;
+    }
+    std::cerr << "\n";
+  }
+}
+
+// Load vectors from .fvecs or .bvecs based on file extension.
+bool LoadVectors(const std::string& path, vindex::FvecsData& out,
+                 size_t max_vectors = 0) {
+  if (path.size() >= 6 && path.compare(path.size() - 6, 6, ".bvecs") == 0) {
+    vindex::BvecsData bdata;
+    if (!vindex::LoadBvecs(path, bdata, max_vectors)) {
+      return false;
+    }
+    out.dim = bdata.dim;
+    out.values = std::move(bdata.values);
+    return true;
+  }
+  return vindex::LoadFvecs(path, out, max_vectors);
 }
 
 uint64_t ComputeNextId(const std::vector<vindex::SegmentReader>& segments) {
@@ -67,14 +74,8 @@ bool LoadSegments(const vindex::Manifest& manifest,
   for (const auto& meta : manifest.segments()) {
     vindex::SegmentReader reader;
     if (cache) {
-<<<<<<< HEAD
       auto cached_io = std::make_unique<vindex::CachedIOBackend>(
           vindex::MakeDefaultIOBackend(), cache);
-=======
-      auto sync_io = std::make_unique<vindex::SyncIOBackend>();
-      auto cached_io = std::make_unique<vindex::CachedIOBackend>(
-          std::move(sync_io), cache);
->>>>>>> 500ef092e647c8152098a19ff41d5e15edd92f10
       if (!reader.OpenWithIO(meta.path, meta.id_offset, std::move(cached_io))) {
         std::cerr << "Failed to open segment: " << meta.path << "\n";
         return false;
@@ -92,26 +93,26 @@ bool LoadSegments(const vindex::Manifest& manifest,
 
 int CmdTrainPq(const vindex::ArgParser& args) {
   std::string input_path = args.Get("input");
-  std::string out_path = args.Get("out");
-  if (input_path.empty() || out_path.empty()) {
-    std::cerr << "Missing --input or --out\n";
+  std::string output_path = args.Get("output");
+  if (input_path.empty() || output_path.empty()) {
+    std::cerr << "Missing --input or --output\n";
     return 1;
   }
 
   vindex::FvecsData data;
   size_t limit = args.GetSizeT("limit", 100000);
-  if (!vindex::LoadFvecs(input_path, data, limit)) {
+  if (!LoadVectors(input_path, data, limit)) {
     std::cerr << "Failed to load training vectors\n";
     return 1;
   }
 
   vindex::PQConfig config;
-  config.M = static_cast<uint32_t>(args.GetInt("M", 64));
-  config.K = static_cast<uint32_t>(args.GetInt("K", 256));
-  config.max_iters = static_cast<int>(args.GetInt("iters", 25));
+  config.M = static_cast<uint32_t>(args.GetInt("pq-m", 64));
+  config.K = static_cast<uint32_t>(args.GetInt("pq-k", 256));
+  config.max_iters = static_cast<int>(args.GetInt("pq-iters", 25));
 
   if (data.dim % config.M != 0) {
-    std::cerr << "Error: dim " << data.dim << " not divisible by M " << config.M << "\n";
+    std::cerr << "Error: dim " << data.dim << " not divisible by pq-m " << config.M << "\n";
     return 1;
   }
 
@@ -122,12 +123,12 @@ int CmdTrainPq(const vindex::ArgParser& args) {
     return 1;
   }
 
-  if (!vindex::PQTrainer::SaveCodebook(out_path, codebook)) {
+  if (!vindex::PQTrainer::SaveCodebook(output_path, codebook)) {
     std::cerr << "Failed to save codebook\n";
     return 1;
   }
 
-  std::cout << "PQ codebook saved to: " << out_path << "\n";
+  std::cout << "PQ codebook saved to: " << output_path << "\n";
   std::cout << "  M=" << codebook.M << " K=" << codebook.K
             << " subspace_dim=" << codebook.subspace_dim << "\n";
   std::cout << "  Training vectors: " << data.count() << "\n";
@@ -135,26 +136,28 @@ int CmdTrainPq(const vindex::ArgParser& args) {
   size_t centroids_bytes = static_cast<size_t>(codebook.M) * codebook.K *
                            codebook.subspace_dim * sizeof(float);
   std::cout << "  Codebook size: " << centroids_bytes << " bytes\n";
+
+  CheckUnknownArgs(args);
   return 0;
 }
 
 int CmdBuild(const vindex::ArgParser& args) {
-  std::string base_path = args.Get("base");
-  if (base_path.empty()) {
-    std::cerr << "Missing --base\n";
+  std::string input_path = args.Get("input");
+  if (input_path.empty()) {
+    std::cerr << "Missing --input\n";
     return 1;
   }
 
   std::string codebook_path = args.Get("codebook");
 
-  std::string out_dir = args.Get("out_dir", "data");
-  std::filesystem::create_directories(out_dir);
-  std::string segment_path = args.Get("segment", out_dir + "/segment_0.vsg");
-  std::string manifest_path = args.Get("manifest", out_dir + "/manifest.txt");
+  std::string output_dir = args.Get("output", "data");
+  std::filesystem::create_directories(output_dir);
+  std::string segment_path = args.Get("segment", output_dir + "/segment_0.vsg");
+  std::string manifest_path = args.Get("manifest", output_dir + "/manifest.txt");
 
   vindex::FvecsData base;
   size_t limit = args.GetSizeT("limit", 0);
-  if (!vindex::LoadFvecs(base_path, base, limit)) {
+  if (!LoadVectors(input_path, base, limit)) {
     std::cerr << "Failed to load base vectors\n";
     return 1;
   }
@@ -162,6 +165,9 @@ int CmdBuild(const vindex::ArgParser& args) {
   vindex::GraphBuildConfig cfg;
   cfg.degree = static_cast<uint32_t>(args.GetInt("degree", 32));
   cfg.builder = args.Get("builder", "auto");
+  cfg.beam_width = static_cast<uint32_t>(args.GetInt("build-beam", 64));
+  cfg.alpha = args.GetFloat("alpha", 1.2f);
+  cfg.max_visits = static_cast<uint32_t>(args.GetInt("max-build-visits", 5000));
 
   std::vector<std::vector<vindex::VectorId>> neighbors;
   if (!vindex::BuildKnnGraph(base.values, base.dim, cfg, neighbors)) {
@@ -212,14 +218,16 @@ int CmdBuild(const vindex::ArgParser& args) {
 
   std::cout << "Built segment: " << segment_path << "\n";
   std::cout << "Manifest: " << manifest_path << "\n";
+
+  CheckUnknownArgs(args);
   return 0;
 }
 
 int CmdQuery(const vindex::ArgParser& args) {
   std::string manifest_path = args.Get("manifest");
-  std::string query_path = args.Get("query");
-  if (manifest_path.empty() || query_path.empty()) {
-    std::cerr << "Missing --manifest or --query\n";
+  std::string input_path = args.Get("input");
+  if (manifest_path.empty() || input_path.empty()) {
+    std::cerr << "Missing --manifest or --input\n";
     return 1;
   }
 
@@ -229,10 +237,9 @@ int CmdQuery(const vindex::ArgParser& args) {
     return 1;
   }
 
-  bool no_cache = args.HasFlag("no_cache");
-  size_t cache_mb = args.GetSizeT("cache_mb", 0);
+  size_t cache_mb = args.GetSizeT("cache", 0);
   std::unique_ptr<vindex::CachePool> cache;
-  if (!no_cache && cache_mb > 0) {
+  if (cache_mb > 0) {
     cache = std::make_unique<vindex::CachePool>(cache_mb * 1024 * 1024);
   }
 
@@ -243,15 +250,15 @@ int CmdQuery(const vindex::ArgParser& args) {
 
   vindex::FvecsData queries;
   size_t limit = args.GetSizeT("limit", 0);
-  if (!vindex::LoadFvecs(query_path, queries, limit)) {
+  if (!LoadVectors(input_path, queries, limit)) {
     std::cerr << "Failed to load queries\n";
     return 1;
   }
 
   vindex::SearchParams params;
   params.top_k = static_cast<uint32_t>(args.GetInt("topk", 10));
-  params.beam_width = static_cast<uint32_t>(args.GetInt("beam", 32));
-  params.max_visits = static_cast<uint32_t>(args.GetInt("max_visits", 10000));
+  params.beam_width = static_cast<uint32_t>(args.GetInt("beam", 8));
+  params.max_visits = static_cast<uint32_t>(args.GetInt("max-visits", 1000));
 
   bool use_prefetch = args.HasFlag("prefetch");
   std::unique_ptr<vindex::PrefetchScheduler> prefetch;
@@ -259,7 +266,7 @@ int CmdQuery(const vindex::ArgParser& args) {
     prefetch = std::make_unique<vindex::PrefetchScheduler>(params.beam_width);
   }
 
-  size_t num_threads = args.GetSizeT("threads", 1);
+  size_t num_threads = args.GetSizeT("threads", 4);
   std::unique_ptr<vindex::ThreadPool> pool;
   if (num_threads > 1) {
     pool = std::make_unique<vindex::ThreadPool>(num_threads);
@@ -273,14 +280,35 @@ int CmdQuery(const vindex::ArgParser& args) {
     std::vector<vindex::SearchResult> top_results;
   };
 
+  struct SegInfo {
+    std::string path;
+    uint64_t id_offset;
+  };
+  std::vector<SegInfo> seg_infos;
+  for (const auto& seg : segments) {
+    seg_infos.push_back({seg.path(), seg.id_offset()});
+  }
+
   std::vector<std::future<QueryResult>> futures;
 
   for (size_t qi = 0; qi < queries.count(); ++qi) {
     auto task = [&, qi]() -> QueryResult {
       QueryResult qr{};
       vindex::TopK merged(params.top_k);
-      for (const auto& segment : segments) {
-        vindex::GraphSearcher searcher(segment);
+      for (const auto& info : seg_infos) {
+        vindex::SegmentReader reader;
+        if (cache) {
+          auto cached_io = std::make_unique<vindex::CachedIOBackend>(
+              vindex::MakeDefaultIOBackend(), cache.get());
+          if (!reader.OpenWithIO(info.path, info.id_offset, std::move(cached_io))) {
+            continue;
+          }
+        } else {
+          if (!reader.Open(info.path, info.id_offset)) {
+            continue;
+          }
+        }
+        vindex::GraphSearcher searcher(reader);
         if (prefetch) {
           searcher.SetPrefetchScheduler(prefetch.get());
         }
@@ -348,15 +376,16 @@ int CmdQuery(const vindex::ArgParser& args) {
               << " peak_mb=" << (cs.peak_memory / 1024.0 / 1024.0) << "\n";
   }
 
+  CheckUnknownArgs(args);
   return 0;
 }
 
 int CmdEval(const vindex::ArgParser& args) {
   std::string manifest_path = args.Get("manifest");
-  std::string query_path = args.Get("query");
+  std::string input_path = args.Get("input");
   std::string gt_path = args.Get("groundtruth");
-  if (manifest_path.empty() || query_path.empty() || gt_path.empty()) {
-    std::cerr << "Missing --manifest, --query, or --groundtruth\n";
+  if (manifest_path.empty() || input_path.empty() || gt_path.empty()) {
+    std::cerr << "Missing --manifest, --input, or --groundtruth\n";
     return 1;
   }
 
@@ -366,10 +395,9 @@ int CmdEval(const vindex::ArgParser& args) {
     return 1;
   }
 
-  bool no_cache = args.HasFlag("no_cache");
-  size_t cache_mb = args.GetSizeT("cache_mb", 0);
+  size_t cache_mb = args.GetSizeT("cache", 0);
   std::unique_ptr<vindex::CachePool> cache;
-  if (!no_cache && cache_mb > 0) {
+  if (cache_mb > 0) {
     cache = std::make_unique<vindex::CachePool>(cache_mb * 1024 * 1024);
   }
 
@@ -386,7 +414,7 @@ int CmdEval(const vindex::ArgParser& args) {
 
   vindex::FvecsData queries;
   size_t limit = args.GetSizeT("limit", 0);
-  if (!vindex::LoadFvecs(query_path, queries, limit)) {
+  if (!LoadVectors(input_path, queries, limit)) {
     std::cerr << "Failed to load queries\n";
     return 1;
   }
@@ -399,38 +427,98 @@ int CmdEval(const vindex::ArgParser& args) {
 
   vindex::SearchParams params;
   params.top_k = static_cast<uint32_t>(args.GetInt("topk", 10));
-  params.beam_width = static_cast<uint32_t>(args.GetInt("beam", 32));
-  params.max_visits = static_cast<uint32_t>(args.GetInt("max_visits", 10000));
+  params.beam_width = static_cast<uint32_t>(args.GetInt("beam", 8));
+  params.max_visits = static_cast<uint32_t>(args.GetInt("max-visits", 1000));
+
+  bool use_prefetch = args.HasFlag("prefetch");
+  std::unique_ptr<vindex::PrefetchScheduler> prefetch;
+  if (use_prefetch) {
+    prefetch = std::make_unique<vindex::PrefetchScheduler>(params.beam_width);
+  }
+
+  size_t num_threads = args.GetSizeT("threads", 4);
+  std::unique_ptr<vindex::ThreadPool> pool;
+  if (num_threads > 1) {
+    pool = std::make_unique<vindex::ThreadPool>(num_threads);
+  }
+
+  // Snapshot segment metadata so each thread can open its own reader.
+  struct SegInfo {
+    std::string path;
+    uint64_t id_offset;
+  };
+  std::vector<SegInfo> seg_infos;
+  for (const auto& seg : segments) {
+    seg_infos.push_back({seg.path(), seg.id_offset()});
+  }
 
   size_t queries_count = std::min(queries.count(), groundtruth.count());
   double recall_sum = 0.0;
+  std::mutex recall_mutex;
+  std::vector<std::future<void>> futures;
+
   for (size_t qi = 0; qi < queries_count; ++qi) {
-    vindex::TopK merged(params.top_k);
-    for (const auto& segment : segments) {
-      vindex::GraphSearcher searcher(segment);
-      auto results = searcher.Search(queries.vector_at(qi), queries.dim, params, nullptr);
-      for (const auto& r : results) {
-        merged.Add(r);
+    auto task = [&, qi]() {
+      vindex::TopK merged(params.top_k);
+      for (const auto& info : seg_infos) {
+        vindex::SegmentReader reader;
+        if (cache) {
+          auto cached_io = std::make_unique<vindex::CachedIOBackend>(
+              vindex::MakeDefaultIOBackend(), cache.get());
+          if (!reader.OpenWithIO(info.path, info.id_offset, std::move(cached_io))) {
+            continue;
+          }
+        } else {
+          if (!reader.Open(info.path, info.id_offset)) {
+            continue;
+          }
+        }
+        vindex::GraphSearcher searcher(reader);
+        if (prefetch) {
+          searcher.SetPrefetchScheduler(prefetch.get());
+        }
+        auto results = searcher.Search(queries.vector_at(qi), queries.dim, params, nullptr);
+        for (const auto& r : results) {
+          merged.Add(r);
+        }
       }
-    }
 
-    std::unordered_set<int32_t> gt_ids;
-    const int32_t* gt = groundtruth.vector_at(qi);
-    for (uint32_t k = 0; k < params.top_k && k < groundtruth.dim; ++k) {
-      gt_ids.insert(gt[k]);
-    }
-
-    uint32_t hit = 0;
-    for (const auto& r : merged.results()) {
-      if (gt_ids.find(static_cast<int32_t>(r.id)) != gt_ids.end()) {
-        ++hit;
+      std::unordered_set<int32_t> gt_ids;
+      const int32_t* gt = groundtruth.vector_at(qi);
+      for (uint32_t k = 0; k < params.top_k && k < groundtruth.dim; ++k) {
+        gt_ids.insert(gt[k]);
       }
+
+      uint32_t hit = 0;
+      for (const auto& r : merged.results()) {
+        if (gt_ids.find(static_cast<int32_t>(r.id)) != gt_ids.end()) {
+          ++hit;
+        }
+      }
+      {
+        std::lock_guard lk(recall_mutex);
+        recall_sum += static_cast<double>(hit) / static_cast<double>(params.top_k);
+      }
+    };
+
+    if (pool) {
+      futures.push_back(pool->Submit(task));
+    } else {
+      futures.push_back(std::async(std::launch::deferred, task));
     }
-    recall_sum += static_cast<double>(hit) / static_cast<double>(params.top_k);
+  }
+
+  for (auto& f : futures) {
+    f.get();
   }
 
   double recall = queries_count > 0 ? recall_sum / static_cast<double>(queries_count) : 0.0;
   std::cout << "Recall@" << params.top_k << ": " << recall << "\n";
+
+  if (pool) {
+    std::cout << " [threads=" << num_threads << "]";
+  }
+  std::cout << "\n";
 
   if (cache) {
     const auto& cs = cache->stats();
@@ -439,13 +527,14 @@ int CmdEval(const vindex::ArgParser& args) {
               << " peak_mb=" << (cs.peak_memory / 1024.0 / 1024.0) << "\n";
   }
 
+  CheckUnknownArgs(args);
   return 0;
 }
 
 int CmdInsert(const vindex::ArgParser& args) {
   std::string manifest_path = args.Get("manifest");
   std::string input_path = args.Get("input");
-  std::string out_dir = args.Get("out_dir", "data");
+  std::string output_dir = args.Get("output", "data");
   if (manifest_path.empty() || input_path.empty()) {
     std::cerr << "Missing --manifest or --input\n";
     return 1;
@@ -463,7 +552,8 @@ int CmdInsert(const vindex::ArgParser& args) {
   }
 
   vindex::FvecsData input;
-  if (!vindex::LoadFvecs(input_path, input, 0)) {
+  size_t limit = args.GetSizeT("limit", 0);
+  if (!LoadVectors(input_path, input, limit)) {
     std::cerr << "Failed to load input vectors\n";
     return 1;
   }
@@ -473,11 +563,17 @@ int CmdInsert(const vindex::ArgParser& args) {
     return 1;
   }
 
-  std::filesystem::create_directories(out_dir);
+  std::filesystem::create_directories(output_dir);
+
+  // Save updated manifest to output directory (don't overwrite original).
+  std::string out_manifest_path = output_dir + "/manifest.txt";
 
   vindex::GraphBuildConfig cfg;
   cfg.degree = static_cast<uint32_t>(args.GetInt("degree", 32));
   cfg.builder = args.Get("builder", "auto");
+  cfg.beam_width = static_cast<uint32_t>(args.GetInt("build-beam", 64));
+  cfg.alpha = args.GetFloat("alpha", 1.2f);
+  cfg.max_visits = static_cast<uint32_t>(args.GetInt("max-build-visits", 5000));
   size_t flush = args.GetSizeT("flush", 0);
   const size_t batch_limit = flush == 0 ? input.count() : flush;
 
@@ -509,7 +605,7 @@ int CmdInsert(const vindex::ArgParser& args) {
       return false;
     }
 
-    std::string segment_path = out_dir + "/segment_insert_" + std::to_string(batch_index) + ".vsg";
+    std::string segment_path = output_dir + "/segment_insert_" + std::to_string(batch_index) + ".vsg";
     bool ok = false;
     if (shared_codebook != nullptr) {
       std::vector<uint8_t> pq_codes;
@@ -527,14 +623,13 @@ int CmdInsert(const vindex::ArgParser& args) {
       return false;
     }
 
-    manifest.Add({segment_path, next_id, 0});  // level 0 = fresh flush
+    manifest.Add({segment_path, next_id, 0});
     next_id += batch_count;
     ++batch_index;
     return true;
   };
 
-  // Start compaction scheduler.
-  vindex::CompactionScheduler compactor(manifest_path, out_dir, input.dim);
+  vindex::CompactionScheduler compactor(out_manifest_path, output_dir, input.dim);
   compactor.SetCallback([](const std::string& msg) {
     std::cout << "[compaction] " << msg << "\n";
   });
@@ -545,8 +640,7 @@ int CmdInsert(const vindex::ArgParser& args) {
       if (!flush_buffer(buffer)) {
         return 1;
       }
-      // Trigger compaction check after each flush.
-      if (!manifest.Save(manifest_path)) {
+      if (!manifest.Save(out_manifest_path)) {
         std::cerr << "Failed to save manifest\n";
         return 1;
       }
@@ -558,18 +652,19 @@ int CmdInsert(const vindex::ArgParser& args) {
     if (!flush_buffer(buffer)) {
       return 1;
     }
+    // Only save if we just flushed remaining data.
+    if (!manifest.Save(out_manifest_path)) {
+      std::cerr << "Failed to save manifest\n";
+      return 1;
+    }
   }
 
-  if (!manifest.Save(manifest_path)) {
-    std::cerr << "Failed to save manifest\n";
-    return 1;
-  }
-
-  // Final compaction check and wait for completion.
   compactor.ScheduleCheck();
   compactor.WaitIdle();
 
   std::cout << "Inserted " << input.count() << " vectors into " << batch_index << " segment(s)\n";
+
+  CheckUnknownArgs(args);
   return 0;
 }
 
@@ -577,12 +672,34 @@ int CmdInsert(const vindex::ArgParser& args) {
 
 int main(int argc, char** argv) {
   vindex::ArgParser args(argc, argv);
+
+  // Load config file before anything else (CLI args take precedence).
+  std::string config_path = args.Get("config");
+  if (!config_path.empty()) {
+    if (!args.LoadConfigFile(config_path)) {
+      std::cerr << "Warning: failed to load config file: " << config_path << "\n";
+    }
+  }
+
+  // Resolve --dataset profile (CLI args take precedence).
+  std::string dataset_name = args.Get("dataset");
+  if (!dataset_name.empty()) {
+    args.LoadDatasetProfile(dataset_name);
+  }
+
   if (args.positionals().empty()) {
-    PrintUsage();
+    vindex::ArgParser::PrintHelp();
     return 1;
   }
 
   std::string command = args.positionals().front();
+
+  // Per-subcommand help.
+  if (args.HasFlag("help")) {
+    vindex::ArgParser::PrintHelp(command);
+    return 0;
+  }
+
   if (command == "build") {
     return CmdBuild(args);
   }
@@ -599,6 +716,6 @@ int main(int argc, char** argv) {
     return CmdTrainPq(args);
   }
 
-  PrintUsage();
+  vindex::ArgParser::PrintHelp();
   return 1;
 }

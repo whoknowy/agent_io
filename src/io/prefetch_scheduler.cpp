@@ -4,6 +4,19 @@
 
 namespace vindex {
 
+namespace {
+// Wrapper that seeks to offset and reads size bytes into buf.
+bool ReadAt(std::ifstream& stream, uint64_t offset, size_t size,
+            std::vector<uint8_t>& buf) {
+  buf.resize(size);
+  stream.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+  if (!stream) return false;
+  stream.read(reinterpret_cast<char*>(buf.data()),
+              static_cast<std::streamsize>(size));
+  return static_cast<size_t>(stream.gcount()) == size;
+}
+}  // namespace
+
 PrefetchScheduler::PrefetchScheduler(size_t max_in_flight)
     : max_in_flight_(max_in_flight),
       worker_(&PrefetchScheduler::WorkerLoop, this) {}
@@ -92,15 +105,12 @@ void PrefetchScheduler::WorkerLoop() {
 
     if (!req) continue;
 
-    // Perform the actual I/O.
-    std::ifstream stream(req->path, std::ios::binary);
-    if (stream.is_open()) {
-      req->data.resize(req->size);
-      stream.seekg(static_cast<std::streamoff>(req->offset), std::ios::beg);
-      stream.read(reinterpret_cast<char*>(req->data.data()),
-                  static_cast<std::streamsize>(req->size));
-      req->ok = static_cast<size_t>(stream.gcount()) == req->size;
+    // Use cached file handle to avoid open/close per read.
+    auto& stream = files_[req->path];
+    if (!stream.is_open()) {
+      stream.open(req->path, std::ios::binary);
     }
+    req->ok = stream.is_open() && ReadAt(stream, req->offset, req->size, req->data);
 
     uint64_t rid = req->id;
     {

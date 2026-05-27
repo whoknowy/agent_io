@@ -1,0 +1,23 @@
+{
+  "siftsmall.base": "siftsmall/siftsmall_base.fvecs",
+  "siftsmall.query": "siftsmall/siftsmall_query.fvecs",
+  "siftsmall.learn": "siftsmall/siftsmall_learn.fvecs",
+  "siftsmall.groundtruth": "siftsmall/siftsmall_groundtruth.ivecs",
+
+  "siftsmall-pq.manifest": "siftsmall/pq_data/manifest.txt",
+  "siftsmall-pq.query": "siftsmall/siftsmall_query.fvecs",
+  "siftsmall-pq.groundtruth": "siftsmall/siftsmall_groundtruth.ivecs",
+
+  "siftsmall-nopq.manifest": "siftsmall/no_pq_data/manifest.txt",
+  "siftsmall-nopq.query": "siftsmall/siftsmall_query.fvecs",
+  "siftsmall-nopq.groundtruth": "siftsmall/siftsmall_groundtruth.ivecs",
+
+  "sift1m.base": "SIFT-1M/sift_base.fvecs",
+  "sift1m.query": "SIFT-1M/sift_query.fvecs",
+  "sift1m.learn": "SIFT-1M/sift_learn.fvecs",
+  "sift1m.groundtruth": "SIFT-1M/sift_groundtruth.ivecs",
+
+  "sift1m-pq.manifest": "data_sift1m/manifest.txt",
+  "sift1m-pq.query": "SIFT-1M/sift_query.fvecs",
+  "sift1m-pq.groundtruth": "SIFT-1M/sift_groundtruth.ivecs"
+}

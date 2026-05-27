@@ -64,6 +64,9 @@ class PrefetchScheduler {
 
   std::atomic<bool> stop_{false};
   std::thread worker_;
+
+  // File handle cache — avoids open/close on every read.
+  std::unordered_map<std::string, std::ifstream> files_;
 };
 
 }  // namespace vindex

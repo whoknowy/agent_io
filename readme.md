@@ -42,6 +42,72 @@ SIFT-1M/                          # SIFT 百万级完整数据集
 └── sift_learn.fvecs
 ```
 
+### 使用帮助
+
+每个子命令都支持 `--help` 查看详细参数说明：
+
+```bash
+vindex              # 查看所有可用命令
+vindex build --help  # 查看 build 命令的参数说明
+vindex query --help  # 查看 query 命令的参数说明
+```
+
+### 快速启动：`--dataset`
+
+只需指定数据集名称即可自动解析所有文件路径，无需逐一指定 `--input`、`--manifest` 等：
+
+```bash
+# 评估精度（自动找到 manifest / query / groundtruth）
+vindex eval --dataset siftsmall-pq --topk 10
+
+# 查询
+vindex query --dataset siftsmall-pq --topk 10
+
+# 构建索引
+vindex build --dataset siftsmall --output data_out
+
+# 训练码本
+vindex train-pq --dataset siftsmall --output codebook.pcb
+```
+
+可用的数据集名称：
+
+| 名称 | 说明 | 包含的字段 |
+|------|------|-----------|
+| `siftsmall` | SIFT 小规模原始数据 | base, query, learn, groundtruth |
+| `siftsmall-pq` | 预构建 PQ 索引 (10K, M=64) | manifest, query, groundtruth |
+| `siftsmall-nopq` | 预构建无 PQ 索引 | manifest, query, groundtruth |
+| `sift1m` | SIFT 百万级数据 | base, query, learn, groundtruth |
+
+数据集配置文件 `datasets.json` 位于项目根目录，可以自行编辑添加新的数据集。
+
+> 手动指定的 CLI 参数会覆盖 `--dataset` 自动填充的值。
+
+### 配置文件：`--config`
+
+支持通过 JSON 配置文件加载参数，命令行参数优先级更高：
+
+```bash
+vindex build --config build_config.json
+```
+
+`build_config.json` 示例：
+
+```json
+{
+  "input": "siftsmall/siftsmall_base.fvecs",
+  "output": "data_pq",
+  "degree": 32,
+  "builder": "vamana",
+  "alpha": 1.2,
+  "build_beam": 64,
+  "codebook": "siftsmall/codebook.pcb",
+  "limit": 10000
+}
+```
+
+> JSON key 使用下划线（`build_beam`），对应 CLI 的 `--build-beam`。
+
 ---
 
 ## 命令详解
@@ -51,59 +117,74 @@ SIFT-1M/                          # SIFT 百万级完整数据集
 对训练向量进行乘积量化（Product Quantization），生成码本文件，用于后续构建和查询时的有损压缩加速。
 
 ```bash
+# 快速启动（自动找到 learn 向量）
+vindex train-pq --dataset siftsmall --output siftsmall/codebook.pcb
+
+# 完整参数
 vindex train-pq \
-    --input siftsmall/siftsmall_learn.fvecs \
-    --out   siftsmall/codebook.pcb \
-    --M 64 \
-    --K 256 \
-    --iters 25 \
+    --input  siftsmall/siftsmall_learn.fvecs \
+    --output siftsmall/codebook.pcb \
+    --pq-m 64 \
+    --pq-k 256 \
+    --pq-iters 25 \
     --limit 100000
 ```
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--input` | (必填) | 训练向量路径 (.fvecs) |
-| `--out` | (必填) | 码本输出路径 (.pcb) |
-| `--M` | 64 | 子空间数量（必须整除向量维度） |
-| `--K` | 256 | 每个子空间的聚类中心数 |
-| `--iters` | 25 | K-Means 最大迭代次数 |
+| `--output` | (必填) | 码本输出路径 (.pcb) |
+| `--pq-m` | 64 | 子空间数量（必须整除向量维度） |
+| `--pq-k` | 256 | 每个子空间的聚类中心数 |
+| `--pq-iters` | 25 | K-Means 最大迭代次数 |
 | `--limit` | 100000 | 最多使用的训练向量数 |
 
 ---
 
 ### 2. 构建索引：`build`
 
-加载基础向量，构建 KNN 图索引，写入磁盘段文件和清单（manifest）。
+加载基础向量，构建图索引，写入磁盘段文件和清单（manifest）。
 
 ```bash
+# 快速启动（自动找到 base 向量）
+vindex build --dataset siftsmall --output data_no_pq
+
 # 无 PQ 压缩
 vindex build \
-    --base    siftsmall/siftsmall_base.fvecs \
-    --out_dir data_no_pq \
-    --degree  32
+    --input  siftsmall/siftsmall_base.fvecs \
+    --output data_no_pq \
+    --degree 32
 
 # 带 PQ 压缩
 vindex build \
-    --base     siftsmall/siftsmall_base.fvecs \
-    --out_dir  data_pq \
+    --input    siftsmall/siftsmall_base.fvecs \
+    --output   data_pq \
     --degree   32 \
     --codebook siftsmall/codebook.pcb
 
 # 使用 Vamana 近似构建（适用于 >1 万向量）
 vindex build \
-    --base    SIFT-1M/sift_base.fvecs \
-    --out_dir data_sift1m \
-    --degree  32 \
-    --builder vamana
+    --input    SIFT-1M/sift_base.fvecs \
+    --output   data_sift1m \
+    --degree   32 \
+    --builder  vamana \
+    --alpha    1.2 \
+    --build-beam 64
+
+# 从配置文件加载参数
+vindex build --config build_config.json
 ```
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--base` | (必填) | 基础向量路径 (.fvecs) |
-| `--out_dir` | data | 输出目录 |
+| `--input` | (必填) | 基础向量路径 (.fvecs) |
+| `--output` | data | 输出目录 |
 | `--degree` | 32 | 图节点最大出度 |
 | `--codebook` | (空) | PQ 码本路径，指定后启用 PQ 压缩 |
 | `--builder` | auto | 图构建算法：`brute`（精确 O(N²)）、`vamana`（近似）、`auto`（≤1 万用 brute，>1 万用 vamana） |
+| `--build-beam` | 64 | 图构建时的束宽（Vamana 模式） |
+| `--alpha` | 1.2 | Vamana 剪枝系数（越大图越稀疏） |
+| `--max-build-visits` | 5000 | 构建时每个节点最多访问数 |
 | `--limit` | 0 | 最多加载的向量数（0 = 全部） |
 
 **输出文件：**
@@ -117,36 +198,28 @@ vindex build \
 对已构建的索引执行 Top-K 近似最近邻搜索。
 
 ```bash
-# 基础查询
-vindex query \
-    --manifest  data_pq/manifest.txt \
-    --query     siftsmall/siftsmall_query.fvecs \
-    --topk 10 \
-    --beam 32
+# 快速启动 — 使用默认参数即可
+vindex query --dataset siftsmall-pq --topk 10
 
-# 开启缓存 + 预取 + 多线程
-vindex query \
-    --manifest  data_pq/manifest.txt \
-    --query     siftsmall/siftsmall_query.fvecs \
-    --topk 10 \
-    --beam 32 \
-    --cache_mb 20 \
-    --prefetch \
-    --threads 4
+# 高精度模式
+vindex query --dataset sift1m-pq --topk 10 --beam 16 --max-visits 5000
+
+# 高速模式
+vindex query --dataset sift1m-pq --topk 10 --beam 4 --max-visits 1000
+```
 ```
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--manifest` | (必填) | 段清单路径 |
-| `--query` | (必填) | 查询向量路径 (.fvecs) |
+| `--input` | (必填) | 查询向量路径 (.fvecs) |
 | `--topk` | 10 | 返回结果数 K |
-| `--beam` | 32 | Beam Search 的束宽（越大精度越高，越慢） |
-| `--max_visits` | 10000 | 每次搜索最多访问的节点数 |
+| `--beam` | 8 | Beam Search 的束宽（越大精度越高，越慢） |
+| `--max-visits` | 1000 | 每次搜索最多访问的节点数 |
 | `--limit` | 0 | 最多查询的向量数（0 = 全部） |
-| `--cache_mb` | 0 | 用户态缓存大小（MB），0 = 不启用 |
-| `--no_cache` | — | 显式禁用缓存 |
+| `--cache` | 0 | 用户态缓存大小（MB），0 = 不启用 |
 | `--prefetch` | — | 启用拓扑感知异步预取 |
-| `--threads` | 1 | 并行查询线程数 |
+| `--threads` | 4 | 并行查询线程数 |
 
 **输出示例：**
 ```
@@ -165,20 +238,17 @@ Cache: hits=19583 misses=12192 hit_rate=0.616 peak_mb=5.00
 对比真值标注计算 Recall@K。
 
 ```bash
-vindex eval \
-    --manifest    data_pq/manifest.txt \
-    --query       siftsmall/siftsmall_query.fvecs \
-    --groundtruth siftsmall/siftsmall_groundtruth.ivecs \
-    --topk 10 \
-    --beam 32 \
-    --cache_mb 20 \
-    --prefetch
+# 快速启动
+vindex eval --dataset siftsmall-pq --topk 10
+
+# SIFT-1M 全量评测（推荐）
+vindex eval --dataset sift1m-pq --topk 10 --beam 4 --max-visits 1000 --cache 200
 ```
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--manifest` | (必填) | 段清单路径 |
-| `--query` | (必填) | 查询向量路径 (.fvecs) |
+| `--input` | (必填) | 查询向量路径 (.fvecs) |
 | `--groundtruth` | (必填) | 真值标注路径 (.ivecs) |
 | 其余参数同 `query` | | |
 
@@ -189,10 +259,14 @@ vindex eval \
 向现有索引批量追加新向量。内部采用 LSM-Tree 风格：小批次写入 Level-0 段，后台自动合并。
 
 ```bash
+# 快速启动（自动找到 manifest）
+vindex insert --dataset siftsmall-pq --input new_vectors.fvecs
+
+# 完整参数
 vindex insert \
-    --manifest  data_pq/manifest.txt \
-    --input     new_vectors.fvecs \
-    --out_dir   data_pq \
+    --manifest data_pq/manifest.txt \
+    --input    new_vectors.fvecs \
+    --output   data_pq \
     --flush 1000 \
     --degree 32
 ```
@@ -201,9 +275,13 @@ vindex insert \
 |------|--------|------|
 | `--manifest` | (必填) | 现有段清单路径 |
 | `--input` | (必填) | 新增向量路径 (.fvecs) |
-| `--out_dir` | data | 新段输出目录 |
+| `--output` | data | 新段输出目录 |
 | `--flush` | 0 | 每批次向量数（0 = 一次性全部写入一个段） |
 | `--degree` | 32 | 图节点最大出度 |
+| `--builder` | auto | 图构建算法 |
+| `--build-beam` | 64 | 图构建时的束宽 |
+| `--alpha` | 1.2 | Vamana 剪枝系数 |
+| `--max-build-visits` | 5000 | 构建时每节点最多访问数 |
 
 **工作流程：**
 1. 向量缓冲到内存 MemTable
@@ -215,12 +293,12 @@ vindex insert \
 
 ## 核心优化配置指南
 
-### 缓存池 (`--cache_mb`)
+### 缓存池 (`--cache`)
 
 建议设置为数据集原始向量大小的 10-20%。例如：
 
-- siftsmall（1 万 × 128 维 × 4 字节 ≈ 5 MB）：`--cache_mb 1` 到 `--cache_mb 5`
-- SIFT1M（100 万 × 128 × 4 ≈ 512 MB）：`--cache_mb 50` 到 `--cache_mb 100`
+- siftsmall（1 万 × 128 维 × 4 字节 ≈ 5 MB）：`--cache 1` 到 `--cache 5`
+- SIFT1M（100 万 × 128 × 4 ≈ 512 MB）：`--cache 50` 到 `--cache 100`
 
 缓存对 PQ 模式的加速尤为明显——频繁访问的节点向量和 PQ 码被缓存在内存中，大幅减少磁盘 I/O。
 
@@ -239,9 +317,9 @@ vindex insert \
 | `vamana` | > 1 万向量，可接受近似 | O(N·log N·d) |
 | `auto` | 推荐，自动选择 | — |
 
-Vamana 参数（通过代码配置）：
-- `alpha`：剪枝系数，默认 1.2（越大图越稀疏）
-- `beam_width`：构建时的束宽，默认 64
+Vamana 调参（通过 CLI 配置）：
+- `--alpha`：剪枝系数，默认 1.2（越大图越稀疏）
+- `--build-beam`：构建时的束宽，默认 64（越大精度越高，越慢）
 
 ---
 
@@ -282,15 +360,24 @@ data/segment_L1_0.vsg|0|1
 
 ## 性能预期
 
-在 siftsmall（1 万向量，128 维）上的实测结果：
+### SIFT-1M（100 万 × 128 维，PQ M=16 K=256）
 
-| 配置 | Recall@10 | 缓存命中率 | 预取命中率 |
-|------|-----------|-----------|-----------|
-| PQ + 缓存 5MB | 1.0 | 77% | — |
-| PQ + 缓存 + 预取 | 1.0 | 75% | 49% |
-| PQ + 缓存 + 预取 + 4 线程 | 1.0 | 62% | 60% |
+10K 全量查询实测（beam=4, max-visits=2000）：
 
-> 注：无 PQ 模式下搜索每个邻居都需读盘，I/O 开销极大，强烈建议配合 PQ 使用。
+| 配置 | 耗时 | Recall@10 | 缓存命中 |
+|------|------|-----------|---------|
+| 串行 | 6m46s | 0.9944 | — |
+| 4 线程 | 5m01s | 0.9944 | — |
+| 4 线程 + cache 200MB | 3m34s | 0.9944 | 50.7% |
+
+### SIFT-small（1 万 × 128 维，PQ M=64 K=256）
+
+| 配置 | Recall@10 |
+|------|-----------|
+| 默认参数 | 1.0 |
+| beam=4 max-visits=500 | 0.958 |
+
+> 注：无 PQ 模式下每个邻居都需完整读盘，I/O 开销极大，强烈建议配合 PQ 使用。
 
 ---
 
@@ -305,6 +392,7 @@ src/
 │   └── topk.h                # 堆优化的 Top-K 收集器
 ├── io/
 │   ├── io_backend.h          # 抽象 I/O 后端接口
+│   ├── backend_factory.h     # I/O 后端工厂
 │   ├── sync_io.h/cpp         # 同步 I/O 后端
 │   ├── cached_io.h/cpp       # 缓存装饰器
 │   ├── prefetch_scheduler.h/cpp  # 异步预取调度器

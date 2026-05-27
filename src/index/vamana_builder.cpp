@@ -21,30 +21,28 @@ std::vector<uint32_t> GreedySearch(const std::vector<float>& vectors,
                                    uint32_t max_visits) {
   size_t count = vectors.size() / dim;
   std::vector<uint8_t> visited(count, 0);
-  std::vector<uint32_t> frontier;
+  // Store (distance, node_id) pairs — distance computed once on insertion.
+  std::vector<std::pair<float, uint32_t>> frontier;
 
-  frontier.push_back(entry);
+  float entry_dist = L2Squared(query, vectors.data() + entry * dim, dim);
+  frontier.emplace_back(entry_dist, entry);
   visited[entry] = 1;
+  std::make_heap(frontier.begin(), frontier.end(),
+                 [](const auto& a, const auto& b) { return a.first > b.first; });
 
-  uint32_t visited_count = 1;
+  uint32_t visited_count = 0;
   std::vector<std::pair<float, uint32_t>> candidates;
 
   while (!frontier.empty() && visited_count < max_visits) {
-    // Find the closest unvisited node in the frontier.
-    uint32_t best_idx = 0;
-    float best_dist = std::numeric_limits<float>::max();
-    for (size_t fi = 0; fi < frontier.size(); ++fi) {
-      uint32_t nid = frontier[fi];
-      float d = L2Squared(query, vectors.data() + nid * dim, dim);
-      if (d < best_dist) {
-        best_dist = d;
-        best_idx = static_cast<uint32_t>(fi);
-      }
-    }
+    // Pop the closest node from the min-heap.
+    auto best_dist = frontier.front().first;
+    auto current = frontier.front().second;
+    std::pop_heap(frontier.begin(), frontier.end(),
+                  [](const auto& a, const auto& b) { return a.first > b.first; });
+    frontier.pop_back();
 
-    uint32_t current = frontier[best_idx];
-    frontier.erase(frontier.begin() + best_idx);
-    visited[current] = 1;
+    if (visited[current] == 2) continue;  // already expanded by another path
+    visited[current] = 2;  // mark as expanded
     ++visited_count;
 
     candidates.emplace_back(best_dist, current);
@@ -52,7 +50,10 @@ std::vector<uint32_t> GreedySearch(const std::vector<float>& vectors,
     for (uint32_t neighbor : graph[current]) {
       if (neighbor >= count || visited[neighbor]) continue;
       visited[neighbor] = 1;
-      frontier.push_back(neighbor);
+      float nd = L2Squared(query, vectors.data() + neighbor * dim, dim);
+      frontier.emplace_back(nd, neighbor);
+      std::push_heap(frontier.begin(), frontier.end(),
+                     [](const auto& a, const auto& b) { return a.first > b.first; });
     }
   }
 
