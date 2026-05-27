@@ -14,9 +14,11 @@ struct io_uring;
 namespace vindex {
 
 // io_uring-based I/O backend for Linux 5.1+ with liburing.
+// When writable=true, the file is opened with O_RDWR | O_CREAT.
 class UringIOBackend : public IIOBackend {
  public:
-  explicit UringIOBackend(size_t queue_depth = 64, bool sqpoll = false);
+  explicit UringIOBackend(size_t queue_depth = 64, bool sqpoll = false,
+                          bool writable = false);
   ~UringIOBackend() override;
 
   UringIOBackend(const UringIOBackend&) = delete;
@@ -42,6 +44,7 @@ class UringIOBackend : public IIOBackend {
   int fd_ = -1;
   size_t queue_depth_;
   bool sqpoll_;
+  bool writable_;
   bool ring_init_ = false;
   io_uring* ring_ = nullptr;
 };

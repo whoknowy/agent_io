@@ -157,6 +157,32 @@ bool SegmentReader::ReadNode(uint32_t local_id, std::vector<float>& vector,
   return true;
 }
 
+bool SegmentReader::ReadAllVectors(std::vector<float>& out) const {
+  uint64_t count = header_.count;
+  uint32_t dim = header_.dim;
+  uint32_t record_size = header_.record_size;
+  if (count == 0 || dim == 0 || record_size == 0) return false;
+
+  // Read the entire data region in one sequential I/O.
+  uint64_t total_bytes = static_cast<uint64_t>(count) * record_size;
+  std::vector<uint8_t> buf(total_bytes);
+  if (!io_->ReadAt(header_.data_offset, buf.data(), total_bytes)) {
+    return false;
+  }
+
+  // Parse vectors from the buffer — only the first dim*4 bytes per record.
+  size_t vec_bytes = static_cast<size_t>(dim) * sizeof(float);
+  out.resize(static_cast<size_t>(count) * dim);
+  float* dst = out.data();
+  const uint8_t* src = buf.data();
+  for (uint64_t i = 0; i < count; ++i) {
+    std::memcpy(dst, src, vec_bytes);
+    dst += dim;
+    src += record_size;
+  }
+  return true;
+}
+
 bool SegmentReader::ParseNode(const uint8_t* buffer, uint32_t dim,
                               uint32_t degree, std::vector<float>& vector,
                               std::vector<uint32_t>& neighbors) {
@@ -203,10 +229,14 @@ bool SegmentWriter::WriteSegment(const std::string& path, uint32_t dim,
     }
   }
 
-  SyncIOBackend writer(path, /*writable=*/true);
-  if (!writer.IsOpen()) {
-    return false;
-  }
+  // Use io_uring on Linux, sync I/O otherwise.
+#ifdef VINDEX_IO_URING
+  UringIOBackend io(64, /*sqpoll=*/false, /*writable=*/true);
+  if (!io.Open(path)) return false;
+#else
+  SyncIOBackend io(path, /*writable=*/true);
+  if (!io.IsOpen()) return false;
+#endif
 
   uint32_t record_size = dim * sizeof(float) + degree * sizeof(uint32_t);
   uint64_t data_offset = kHeaderSize;
@@ -214,35 +244,41 @@ bool SegmentWriter::WriteSegment(const std::string& path, uint32_t dim,
 
   std::vector<uint8_t> header_buf(kHeaderSize, 0);
   std::memcpy(header_buf.data(), kMagic, sizeof(kMagic));
-  size_t offset = sizeof(kMagic);
-  WriteU32(header_buf, offset, version);
-  WriteU32(header_buf, offset, dim);
-  WriteU64(header_buf, offset, count);
-  WriteU32(header_buf, offset, degree);
-  WriteU32(header_buf, offset, entry);
-  WriteU32(header_buf, offset, record_size);
-  WriteU64(header_buf, offset, data_offset);
+  size_t header_off = sizeof(kMagic);
+  WriteU32(header_buf, header_off, version);
+  WriteU32(header_buf, header_off, dim);
+  WriteU64(header_buf, header_off, count);
+  WriteU32(header_buf, header_off, degree);
+  WriteU32(header_buf, header_off, entry);
+  WriteU32(header_buf, header_off, record_size);
+  WriteU64(header_buf, header_off, data_offset);
   if (has_pq) {
-    WriteU32(header_buf, offset, codebook.M);
-    WriteU32(header_buf, offset, codebook.K);
+    WriteU32(header_buf, header_off, codebook.M);
+    WriteU32(header_buf, header_off, codebook.K);
   }
 
-  if (!writer.WriteAt(0, header_buf.data(), header_buf.size())) {
+  if (!io.WriteAt(0, header_buf.data(), header_buf.size())) {
     return false;
   }
 
-  std::vector<uint8_t> record_buf(record_size);
-  for (uint64_t i = 0; i < count; ++i) {
-    if (neighbors[i].size() != degree) {
-      return false;
+  // Batch-write nodes: group N nodes per WriteAt to reduce I/O syscalls.
+  // With io_uring this also keeps the submission queue efficiently utilized.
+  constexpr uint64_t kBatchNodes = 500;
+  std::vector<uint8_t> batch_buf(kBatchNodes * record_size);
+  for (uint64_t base = 0; base < count; base += kBatchNodes) {
+    uint64_t batch_count = std::min<uint64_t>(kBatchNodes, count - base);
+    for (uint64_t j = 0; j < batch_count; ++j) {
+      uint64_t idx = base + j;
+      if (neighbors[idx].size() != degree) return false;
+      const float* vec = vectors.data() + static_cast<size_t>(idx) * dim;
+      uint8_t* dst = batch_buf.data() + j * record_size;
+      std::memcpy(dst, vec, dim * sizeof(float));
+      std::memcpy(dst + dim * sizeof(float), neighbors[idx].data(),
+                  degree * sizeof(uint32_t));
     }
-    const float* vec = vectors.data() + i * dim;
-    std::memcpy(record_buf.data(), vec, dim * sizeof(float));
-    std::memcpy(record_buf.data() + dim * sizeof(float),
-                neighbors[i].data(), degree * sizeof(uint32_t));
-
-    uint64_t rec_offset = data_offset + i * record_size;
-    if (!writer.WriteAt(rec_offset, record_buf.data(), record_buf.size())) {
+    uint64_t batch_offset = data_offset + base * record_size;
+    if (!io.WriteAt(batch_offset, batch_buf.data(),
+                    batch_count * record_size)) {
       return false;
     }
   }
@@ -251,27 +287,27 @@ bool SegmentWriter::WriteSegment(const std::string& path, uint32_t dim,
     uint64_t pq_offset = data_offset + count * record_size;
 
     uint32_t pq_header[3] = {codebook.M, codebook.K, codebook.subspace_dim};
-    if (!writer.WriteAt(pq_offset, pq_header, sizeof(pq_header))) {
+    if (!io.WriteAt(pq_offset, pq_header, sizeof(pq_header))) {
       return false;
     }
 
     size_t centroids_size = static_cast<size_t>(codebook.M) * codebook.K *
                             codebook.subspace_dim;
     uint64_t centroids_offset = pq_offset + sizeof(pq_header);
-    if (!writer.WriteAt(centroids_offset, codebook.centroids.data(),
-                        centroids_size * sizeof(float))) {
+    if (!io.WriteAt(centroids_offset, codebook.centroids.data(),
+                    centroids_size * sizeof(float))) {
       return false;
     }
 
     uint64_t codes_offset = centroids_offset +
                             centroids_size * sizeof(float);
-    if (!writer.WriteAt(codes_offset, pq_codes.data(),
-                        pq_codes.size() * sizeof(uint8_t))) {
+    if (!io.WriteAt(codes_offset, pq_codes.data(),
+                    pq_codes.size() * sizeof(uint8_t))) {
       return false;
     }
   }
 
-  return writer.Flush();
+  return io.Flush();
 }
 
 }  // namespace vindex

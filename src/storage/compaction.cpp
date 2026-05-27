@@ -111,7 +111,7 @@ bool CompactionScheduler::CompactLevel(uint32_t level, Manifest& manifest) {
 
   if (source_metas.empty()) return false;
 
-  // Read all vectors from source segments.
+  // Read all vectors from source segments in one sequential read each.
   std::vector<float> all_vectors;
   uint64_t total_count = 0;
 
@@ -124,14 +124,14 @@ bool CompactionScheduler::CompactLevel(uint32_t level, Manifest& manifest) {
       return false;
     }
 
-    for (uint64_t i = 0; i < reader.count(); ++i) {
-      std::vector<float> vec;
-      std::vector<uint32_t> neighbors;
-      if (!reader.ReadNode(static_cast<uint32_t>(i), vec, neighbors)) {
-        return false;
+    std::vector<float> seg_vectors;
+    if (!reader.ReadAllVectors(seg_vectors)) {
+      if (callback_) {
+        callback_("Failed to read vectors from: " + meta.path);
       }
-      all_vectors.insert(all_vectors.end(), vec.begin(), vec.end());
+      return false;
     }
+    all_vectors.insert(all_vectors.end(), seg_vectors.begin(), seg_vectors.end());
     total_count += reader.count();
   }
 

@@ -33,7 +33,10 @@ class SegmentReader {
   bool ReadNode(uint32_t local_id, std::vector<float>& vector,
                 std::vector<uint32_t>& neighbors) const;
 
-  // Parse a node from a pre-read buffer (used with prefetch).
+  // Read all vector data in one sequential read (for compaction/bulk ops).
+  bool ReadAllVectors(std::vector<float>& out) const;
+
+  // Parse a node from a pre-read buffer (used with prefetch, compaction).
   static bool ParseNode(const uint8_t* buffer, uint32_t dim, uint32_t degree,
                         std::vector<float>& vector,
                         std::vector<uint32_t>& neighbors);
