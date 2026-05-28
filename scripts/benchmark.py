@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-VINDEX = PROJECT_ROOT / "build" / "vindex"
+VINDEX = PROJECT_ROOT / "build-uring" / "vindex"
 if os.name == "nt":
     VINDEX = VINDEX.with_suffix(".exe")
 
