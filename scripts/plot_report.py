@@ -49,8 +49,24 @@ def _load_csv(path):
     return rows
 
 def _try_float(v):
-    try: return float(v)
-    except (ValueError, TypeError): return v
+    if v is None:
+        return None
+    if isinstance(v, str) and not v.strip():
+        return None
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return v
+
+def _as_float(value, default=0.0):
+    if value is None:
+        return default
+    if isinstance(value, str) and not value.strip():
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
 
 def _unique_sorted(rows, key):
     return sorted(set(r[key] for r in rows if key in r))
@@ -92,46 +108,68 @@ def fig_heatmap(sweep_csv):
     print("  -> fig6-1_heatmap.png")
 
 
-def fig_ablation(ablation_csv):
-    """Fig 6-2: Ablation bar chart."""
-    rows = _load_csv(ablation_csv)
-    labels = [r["config"] for r in rows]
-
-    # Use total time from avg latency and num queries if available.
-    # Fall back to using QPS directly.
-    times_s = []
+def _find(rows, cache_mb, threads, prefetch):
+    """Find a row matching the given config."""
     for r in rows:
-        num_q = float(r.get("num_queries", 1))
-        avg_lat = float(r.get("lat_avg_ms", 0))
-        n_threads = float(r.get("num_threads", 1))
-        if avg_lat > 0 and num_q > 0:
-            times_s.append(num_q * avg_lat / 1000.0 / n_threads)
-        else:
-            qps = float(r.get("qps", 1))
-            times_s.append(num_q / qps if qps > 0 else 0)
+        if (int(_as_float(r.get("cache_mb"), 0)) == cache_mb
+                and int(_as_float(r.get("threads"), 0)) == threads
+                and int(_as_float(r.get("prefetch"), 0)) == (1 if prefetch else 0)):
+            return r
+    return None
 
-    baseline = times_s[0] if times_s else 1
+def fig_ablation(ablation_csv):
+    """Fig 6-2: Paired ablation — effect of each feature (threads / cache / prefetch)."""
+    rows = _load_csv(ablation_csv)
 
-    fig, ax1 = plt.subplots(figsize=(10, 5))
-    x = np.arange(len(labels))
-    bars = ax1.bar(x, times_s, 0.55,
-                   color=plt.cm.tab10(np.linspace(0, 1, len(labels))))
-    ax1.set_ylabel("Total Time (s)")
-    ax1.set_title("Fig 6-2: Ablation Study")
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(labels, fontsize=8, rotation=20, ha="right")
+    # Three pairwise comparisons, each: (label, off_config, on_config)
+    pairs = [
+        ("Threads\n(1 vs 4)",   _find(rows, 0, 1, False), _find(rows, 0, 4, False)),
+        ("Cache\n(0 vs 200MB)", _find(rows, 0, 4, False), _find(rows, 200, 4, False)),
+        ("Prefetch\n(off vs on)", _find(rows, 0, 4, False), _find(rows, 0, 4, True)),
+    ]
 
-    for i, (t, bar) in enumerate(zip(times_s, bars)):
-        sp = baseline / t if t > 0 else 1
-        ax1.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(times_s) * 0.02,
-                 f"{sp:.1f}x", ha="center", fontsize=9, fontweight="bold")
+    fig, axes = plt.subplots(1, 3, figsize=(12, 5))
 
-    ax2 = ax1.twinx()
-    recalls = [float(r.get("recall_10", 0)) for r in rows]
-    ax2.plot(x, recalls, "ko-", linewidth=2, markersize=8)
-    ax2.set_ylabel("Recall@10"); ax2.set_ylim(0.9, 1.0)
-    ax2.axhline(y=0.85, color="red", linestyle="--", linewidth=1, alpha=0.5)
+    for ax, (title, off, on) in zip(axes, pairs):
+        off_qps = _as_float(off["qps"]) if off else 0
+        on_qps = _as_float(on["qps"]) if on else 0
+        off_lat = _as_float(off["lat_p50_ms"]) if off else 0
+        on_lat = _as_float(on["lat_p50_ms"]) if on else 0
 
+        x = [0, 1]
+        qps_vals = [off_qps, on_qps]
+        lat_vals = [off_lat, on_lat]
+        colors = ["#b0b0b0", "#2ecc71"]
+
+        bars = ax.bar(x, qps_vals, 0.5, color=colors, edgecolor="white", linewidth=0.8)
+        ax.set_xticks(x)
+        ax.set_xticklabels(["off", "on"])
+        ax.set_title(title, fontsize=12, fontweight="bold")
+
+        # QPS value on top of each bar
+        for bar, v in zip(bars, qps_vals):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(qps_vals) * 0.03,
+                    f"{v:.0f}", ha="center", fontsize=11, fontweight="bold")
+
+        # Speedup annotation between the two bars
+        if off_qps > 0:
+            ratio = on_qps / off_qps
+            mid_x = 0.5
+            mid_y = max(qps_vals) * 1.15
+            color = "#27ae60" if ratio >= 1 else "#e74c3c"
+            ax.annotate(f"{ratio:.2f}x", xy=(mid_x, mid_y), ha="center", fontsize=12,
+                        fontweight="bold", color=color)
+
+        # P50 latency text below QPS
+        for i, (bar, lat) in enumerate(zip(bars, lat_vals)):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() * 0.15,
+                    f"P50={lat:.0f}ms", ha="center", fontsize=9, color="white")
+
+        ax.set_ylabel("QPS")
+        ax.set_ylim(0, max(qps_vals) * 1.3)
+
+    fig.suptitle("Fig 6-2: Ablation Study — Feature On/Off Comparison", fontsize=14, y=1.02)
+    fig.tight_layout()
     fig.savefig(OUT_DIR / "fig6-2_ablation.png"); plt.close(fig)
     print("  -> fig6-2_ablation.png")
 
@@ -139,9 +177,9 @@ def fig_ablation(ablation_csv):
 def fig_cache(cache_csv):
     """Fig 6-3: Cache hit rate & time vs cache size."""
     rows = _load_csv(cache_csv)
-    cache_mb = [float(r["cache_mb"]) for r in rows]
-    hit_rate = [float(r.get("cache_hit_rate", 0)) for r in rows]
-    qps = [float(r.get("qps", 0)) for r in rows]
+    cache_mb = [_as_float(r["cache_mb"]) for r in rows]
+    hit_rate = [_as_float(r.get("cache_hit_rate")) for r in rows]
+    qps = [_as_float(r.get("qps")) for r in rows]
 
     fig, ax1 = plt.subplots(figsize=(8, 5))
     ax1.plot(cache_mb, hit_rate, "o-", color="#e74c3c", linewidth=2, markersize=8)
@@ -166,8 +204,8 @@ def fig_cache(cache_csv):
 def fig_threads(thread_csv):
     """Fig 6-4: Thread scaling speedup."""
     rows = _load_csv(thread_csv)
-    threads = [int(r["threads"]) for r in rows]
-    qps = [float(r["qps"]) for r in rows]
+    threads = [int(_as_float(r["threads"])) for r in rows]
+    qps = [_as_float(r["qps"]) for r in rows]
 
     baseline_qps = qps[0] if qps else 1
     speedup = [q / baseline_qps for q in qps]
@@ -191,10 +229,10 @@ def fig_stress(stress_csv):
     """Fig 6-5: Stress test time-series or boxplot."""
     rows = _load_csv(stress_csv)
     # CSV columns: time,read_qps,p50_ms,p95_ms,p99_ms,write_ops,recall10,...
-    times = [float(r.get("time", i)) for i, r in enumerate(rows)]
-    read_qps = [float(r.get("read_qps", 0)) for r in rows]
-    p95 = [float(r.get("p95_ms", 0)) for r in rows]
-    write_ops = [float(r.get("write_ops", 0)) for r in rows]
+    times = [_as_float(r.get("time"), i) for i, r in enumerate(rows)]
+    read_qps = [_as_float(r.get("read_qps")) for r in rows]
+    p95 = [_as_float(r.get("p95_ms")) for r in rows]
+    write_ops = [_as_float(r.get("write_ops")) for r in rows]
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
 
@@ -227,19 +265,19 @@ def fig_scatter(sweep_csv):
     """Fig 7-1: Recall vs time scatter with Pareto frontier."""
     rows = _load_csv(sweep_csv)
     beams = _unique_sorted(rows, "beam")
+    visits_sorted = _unique_sorted(rows, "max_visits")
     markers = {4: "o", 8: "s", 16: "D", 32: "^"}
 
     fig, ax = plt.subplots(figsize=(8, 6))
     for r in rows:
         b = r["beam"]
         mv = r["max_visits"]
-        lat = float(r.get("lat_avg_ms", 0))
-        rec = float(r["recall_10"])
+        lat = _as_float(r.get("lat_avg_ms"))
+        rec = _as_float(r["recall_10"])
         mk = markers.get(b, "o")
         ax.scatter(lat, rec, marker=mk, s=100, edgecolors="black", linewidth=0.3,
                    label=f"b={int(b)},v={int(mv)}" if mv == visits_sorted[0] else "")
 
-    visits_sorted = _unique_sorted(rows, "max_visits")
     # Pareto frontier.
     points = sorted([(float(r["lat_avg_ms"]), float(r["recall_10"])) for r in rows])
     pareto_x, pareto_y = [], []

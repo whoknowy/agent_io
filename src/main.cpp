@@ -789,6 +789,10 @@ int CmdInsert(const vindex::ArgParser& args) {
 }
 
 int CmdStress(const vindex::ArgParser& args) {
+  // Disable stdout buffering: stress runs under timeout which may SIGKILL,
+  // and buffered output would be lost. stderr is already unbuffered.
+  std::cout << std::unitbuf;
+
   std::string manifest_path = args.Get("manifest");
   std::string input_path = args.Get("input");    // query vectors
   std::string gt_path = args.Get("groundtruth");
@@ -958,7 +962,24 @@ int CmdStress(const vindex::ArgParser& args) {
   auto t_start = std::chrono::high_resolution_clock::now();
 
   for (size_t r = 0; r < num_readers; ++r) {
-    readers.emplace_back([&]() {
+    readers.emplace_back([&, r]() {
+      // Open per-thread readers once and reuse across queries.
+      // Avoids creating a new io_uring ring + loading 16MB PQ codes per query.
+      std::vector<vindex::SegmentReader> thread_readers;
+      std::vector<vindex::GraphSearcher> thread_searchers;
+      for (const auto& info : base_seg_infos) {
+        vindex::SegmentReader rdr;
+        if (cache) {
+          auto io = std::make_unique<vindex::CachedIOBackend>(
+              vindex::MakeDefaultIOBackend(), cache.get());
+          if (!rdr.OpenWithIO(info.path, info.id_offset, std::move(io))) continue;
+        } else {
+          if (!rdr.Open(info.path, info.id_offset)) continue;
+        }
+        thread_readers.push_back(std::move(rdr));
+        thread_searchers.emplace_back(thread_readers.back());
+      }
+
       std::mt19937 rng(static_cast<uint32_t>(r + 42));
       std::uniform_int_distribution<size_t> dist(0, query_pool_size - 1);
 
@@ -968,18 +989,9 @@ int CmdStress(const vindex::ArgParser& args) {
 
         vindex::TopK merged(params.top_k);
         vindex::SearchStats local_stats;
-        for (const auto& info : base_seg_infos) {
-          vindex::SegmentReader reader;
-          if (cache) {
-            auto io = std::make_unique<vindex::CachedIOBackend>(
-                vindex::MakeDefaultIOBackend(), cache.get());
-            if (!reader.OpenWithIO(info.path, info.id_offset, std::move(io))) continue;
-          } else {
-            if (!reader.Open(info.path, info.id_offset)) continue;
-          }
-          vindex::GraphSearcher searcher(reader);
+        for (size_t si = 0; si < thread_readers.size(); ++si) {
           vindex::SearchStats seg_stats;
-          auto results = searcher.Search(queries.vector_at(qi), queries.dim, params, &seg_stats);
+          auto results = thread_searchers[si].Search(queries.vector_at(qi), queries.dim, params, &seg_stats);
           local_stats.visited += seg_stats.visited;
           local_stats.pq_distances += seg_stats.pq_distances;
           local_stats.exact_reads += seg_stats.exact_reads;

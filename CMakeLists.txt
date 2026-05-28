@@ -4,7 +4,7 @@ project(vindex_mvp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-option(VINDEX_USE_IO_URING "Enable io_uring backend" OFF)
+option(VINDEX_USE_IO_URING "Enable io_uring backend" ON)
 
 add_executable(vindex
     src/main.cpp

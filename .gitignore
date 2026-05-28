@@ -11,6 +11,7 @@
 *.exe
 /results/
 
+/build*/
 # Python caches
 __pycache__/
 *.pyc
