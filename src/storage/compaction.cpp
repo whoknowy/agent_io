@@ -7,6 +7,7 @@
 
 #include "dataset/fvecs.h"
 #include "index/graph_builder.h"
+#include "pq/pq_codec.h"
 #include "storage/manifest.h"
 #include "storage/segment.h"
 
@@ -137,12 +138,32 @@ bool CompactionScheduler::CompactLevel(uint32_t level, Manifest& manifest) {
 
   if (total_count == 0) return false;
 
+  // Scale max_visits to batch size — small batches don't need deep search.
+  uint32_t scaled_visits = max_build_visits_;
+  if (total_count < 5000) {
+    scaled_visits = std::max(500u, static_cast<uint32_t>(total_count / 4));
+  }
+
   // Rebuild KNN graph.
   GraphBuildConfig cfg;
   cfg.degree = degree_;
+  cfg.beam_width = build_beam_;
+  cfg.alpha = 1.2f;
+  cfg.max_visits = scaled_visits;
+  cfg.builder = (total_count > 10000) ? "vamana" : "brute";
   std::vector<std::vector<VectorId>> new_neighbors;
   if (!BuildKnnGraph(all_vectors, dim_, cfg, new_neighbors)) {
     return false;
+  }
+
+  // Preserve PQ codebook from source segment if available.
+  const PQCodebook* codebook = nullptr;
+  {
+    SegmentReader first;
+    if (first.Open(source_metas.front().path, source_metas.front().id_offset) &&
+        first.HasPQ()) {
+      codebook = &first.codebook();
+    }
   }
 
   // Write new segment at next level.
@@ -151,8 +172,18 @@ bool CompactionScheduler::CompactLevel(uint32_t level, Manifest& manifest) {
                          std::to_string(level + 1) + "_" +
                          std::to_string(compaction_count_.load()) + ".vsg";
 
-  if (!SegmentWriter::WriteSegment(new_path, dim_, total_count, degree_,
-                                   0, all_vectors, new_neighbors)) {
+  bool ok;
+  if (codebook && codebook->IsValid()) {
+    std::vector<uint8_t> pq_codes;
+    PQCodec::Encode(all_vectors.data(), total_count, *codebook, pq_codes);
+    ok = SegmentWriter::WriteSegment(new_path, dim_, total_count, degree_,
+                                     0, all_vectors, new_neighbors,
+                                     *codebook, pq_codes);
+  } else {
+    ok = SegmentWriter::WriteSegment(new_path, dim_, total_count, degree_,
+                                     0, all_vectors, new_neighbors);
+  }
+  if (!ok) {
     return false;
   }
 

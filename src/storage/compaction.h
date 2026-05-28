@@ -50,6 +50,8 @@ class CompactionScheduler {
   std::string data_dir_;
   uint32_t dim_;
   uint32_t degree_ = 32;
+  uint32_t build_beam_ = 64;
+  uint32_t max_build_visits_ = 5000;
 
   std::atomic<bool> stop_{false};
   std::atomic<bool> paused_{false};
