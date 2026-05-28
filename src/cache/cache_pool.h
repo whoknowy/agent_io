@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <shared_mutex>
@@ -60,8 +61,10 @@ class CachePool {
 
   uint32_t ComputeWeight(const CacheEntry& entry) const;
   void EvictToWatermark();
+  void DecayAll();
 
   size_t watermark_;
+  std::atomic<uint64_t> access_epoch_{0};  // increments on hit
   mutable std::shared_mutex mutex_;
   std::unordered_map<Key, CacheEntry, KeyHash> cache_;
   CacheStats stats_;

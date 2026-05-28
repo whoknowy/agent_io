@@ -11,19 +11,29 @@ CachePool::CachePool(size_t watermark_bytes) : watermark_(watermark_bytes) {}
 bool CachePool::Get(const std::string& segment_path, uint64_t offset,
                     size_t size, void* out) {
   Key key{segment_path, offset};
-  std::shared_lock lock(mutex_);
+  bool hit = false;
 
-  auto it = cache_.find(key);
-  if (it != cache_.end() && it->second.Size() >= size) {
-    std::memcpy(out, it->second.data.data(), size);
-    it->second.access_count++;
-    it->second.access_count = std::min(it->second.access_count, 999u);
-    ++stats_.hits;
-    return true;
+  {
+    std::shared_lock lock(mutex_);
+    auto it = cache_.find(key);
+    if (it != cache_.end() && it->second.Size() >= size) {
+      std::memcpy(out, it->second.data.data(), size);
+      it->second.access_count++;
+      it->second.access_count = std::min(it->second.access_count, 999u);
+      ++stats_.hits;
+      hit = true;
+    } else {
+      ++stats_.misses;
+    }
   }
 
-  ++stats_.misses;
-  return false;
+  // Periodic aging: halve access counts so cold entries decay.
+  if (hit && access_epoch_.fetch_add(1) % 10000 == 9999) {
+    std::unique_lock lock(mutex_);
+    DecayAll();
+  }
+
+  return hit;
 }
 
 void CachePool::Put(const std::string& segment_path, uint64_t offset,
@@ -108,6 +118,12 @@ uint32_t CachePool::ComputeWeight(const CacheEntry& entry) const {
     priority = 2;
   }
   return priority * 1000 + std::min(entry.access_count, 999u);
+}
+
+void CachePool::DecayAll() {
+  for (auto& [k, entry] : cache_) {
+    entry.access_count >>= 1;  // halve, min 0
+  }
 }
 
 void CachePool::EvictToWatermark() {

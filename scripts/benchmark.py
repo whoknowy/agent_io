@@ -14,6 +14,7 @@ Output: results/*.csv, results/figures/*.png
 import argparse
 import csv
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -187,6 +188,139 @@ def cmd_thread_sweep(args):
 
 
 # ---------------------------------------------------------------------------
+#  write benchmark
+# ---------------------------------------------------------------------------
+
+def cmd_write_bench(args):
+    """Run insert with different flush sizes, measure throughput."""
+    out_path = _out_csv("write_bench.csv")
+    flush_sizes = [int(x) for x in args.flush_sizes.split(",")]
+    rows = []
+
+    for flush in flush_sizes:
+        label = "all" if flush == 0 else str(flush)
+        output_dir = f"data_wb_{label}"
+        print(f"  flush={label} (output={output_dir}) ...", end=" ", flush=True)
+
+        cmd = [str(VINDEX), "insert", "--dataset", args.dataset,
+               "--input", args.write_input,
+               "--output", output_dir,
+               "--flush", str(flush),
+               "--degree", str(args.degree), "--builder", args.builder]
+        if args.write_limit > 0:
+            cmd += ["--limit", str(args.write_limit)]
+
+        t0 = time.time()
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(PROJECT_ROOT))
+        dt = time.time() - t0
+
+        stdout = result.stdout + result.stderr
+        n_segments = 0
+        n_compactions = 0
+        n_vectors = 0
+        for line in stdout.split("\n"):
+            if "Inserted" in line and "vectors into" in line:
+                parts = line.split()
+                n_vectors = int(parts[1])
+                n_segments = int(parts[4])
+            if "[compaction]" in line:
+                n_compactions += 1
+
+        throughput = n_vectors / dt if dt > 0 else 0
+        print(f"{n_vectors}vec {n_segments}seg {n_compactions}comp {dt:.1f}s {throughput:.0f}vec/s")
+
+        rows.append({"flush": flush, "vectors": n_vectors,
+                     "segments": n_segments, "compactions": n_compactions,
+                     "time_s": round(dt, 1), "throughput_vec_s": round(throughput)})
+
+        # Cleanup
+        shutil.rmtree(PROJECT_ROOT / output_dir, ignore_errors=True)
+
+    _write_csv(rows, out_path,
+               ["flush", "vectors", "segments", "compactions", "time_s", "throughput_vec_s"])
+
+    print(f"\n{'flush':>8} {'vectors':>8} {'segs':>5} {'comps':>5} {'time':>8} {'vec/s':>8}")
+    print("-" * 48)
+    for r in rows:
+        print(f"{r['flush']:>8} {r['vectors']:>8} {r['segments']:>5} {r['compactions']:>5} "
+              f"{r['time_s']:>7.1f}s {r['throughput_vec_s']:>8.0f}")
+
+
+# ---------------------------------------------------------------------------
+#  stress benchmark
+# ---------------------------------------------------------------------------
+
+def cmd_stress_bench(args):
+    """Run stress test for different read/write ratios."""
+    out_path = _out_csv("stress_bench.csv")
+    readers = [int(x) for x in args.read_threads.split(",")]
+    writers = [int(x) for x in args.write_threads.split(",")]
+    if len(readers) != len(writers):
+        print("ERROR: --read-threads and --write-threads must have same length", file=sys.stderr)
+        return
+
+    rows = []
+    for rt, wt in zip(readers, writers):
+        label = f"r{rt}_w{wt}"
+        print(f"  {label} ...", end=" ", flush=True)
+
+        cmd = [str(VINDEX), "stress", "--dataset", args.dataset,
+               "--write-input", args.write_input,
+               "--read-threads", str(rt),
+               "--write-threads", str(wt),
+               "--write-batch-size", str(args.batch_size),
+               "--duration", str(args.duration)]
+        if args.cache > 0:
+            cmd += ["--cache", str(args.cache)]
+
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                cwd=str(PROJECT_ROOT), timeout=args.duration + 60)
+        summary_file = PROJECT_ROOT / "results" / f"stress_{label}.csv"
+        lines = [l for l in result.stdout.split("\n") if l.strip() and not l.startswith("[")]
+
+        # Parse monitor lines (CSV) and summary.
+        read_qps_list, p95_list, recall_list, cache_hit_list = [], [], [], []
+        with open(summary_file, "w") as f:
+            for line in lines:
+                if line.startswith("time,"):
+                    f.write(line + "\n")
+                    continue
+                if "Stress Summary" in line:
+                    break
+                parts = line.split(",")
+                if len(parts) >= 7:
+                    try:
+                        read_qps_list.append(float(parts[1]))
+                        p95_list.append(float(parts[3]))
+                        if len(parts) >= 8:
+                            recall_list.append(float(parts[6]))
+                        if len(parts) >= 9:
+                            cache_hit_list.append(float(parts[7]))
+                    except ValueError:
+                        continue
+
+        avg_qps = sum(read_qps_list) / len(read_qps_list) if read_qps_list else 0
+        avg_p95 = sum(p95_list) / len(p95_list) if p95_list else 0
+        avg_recall = sum(recall_list) / len(recall_list) if recall_list else 0
+        avg_cache = sum(cache_hit_list) / len(cache_hit_list) if cache_hit_list else 0
+
+        print(f"QPS={avg_qps:.1f} P95={avg_p95:.1f}ms Recall={avg_recall:.4f}")
+        rows.append({"config": label, "read_threads": rt, "write_threads": wt,
+                     "qps": round(avg_qps, 1), "p95_ms": round(avg_p95, 1),
+                     "recall_10": round(avg_recall, 4), "cache_hit": round(avg_cache, 4)})
+
+    _write_csv(rows, out_path,
+               ["config", "read_threads", "write_threads", "qps", "p95_ms", "recall_10", "cache_hit"])
+
+    # Summary table.
+    print(f"\n{'Config':>12} {'R':>3} {'W':>3} {'QPS':>8} {'P95ms':>8} {'Recall':>8} {'CacheHit':>8}")
+    print("-" * 55)
+    for r in rows:
+        print(f"{r['config']:>12} {r['read_threads']:>3} {r['write_threads']:>3} "
+              f"{r['qps']:>8.1f} {r['p95_ms']:>8.1f} {r['recall_10']:>8.4f} {r['cache_hit']:>8.3f}")
+
+
+# ---------------------------------------------------------------------------
 #  helpers
 # ---------------------------------------------------------------------------
 
@@ -263,9 +397,28 @@ def main():
     tp.add_argument("--threads", default="1,2,4,8,16")
     tp.add_argument("--cache", type=int, default=0)
 
+    wp = sub.add_parser("write-bench", help="insert benchmark: flush size sweep")
+    wp.add_argument("--dataset", default="sift1m-pq")
+    wp.add_argument("--write-input", default="SIFT-1M/queries.bvecs")
+    wp.add_argument("--write-limit", dest="write_limit", type=int, default=10000)
+    wp.add_argument("--flush-sizes", dest="flush_sizes", default="0,1000,5000")
+    wp.add_argument("--degree", type=int, default=32)
+    wp.add_argument("--builder", default="auto")
+
+    sp2 = sub.add_parser("stress-bench", help="mixed read-write stress test sweep")
+    sp2.add_argument("--dataset", default="sift1m-pq")
+    sp2.add_argument("--write-input", default="SIFT-1M/queries.bvecs")
+    sp2.add_argument("--read-threads", dest="read_threads", default="4,4,2,1")
+    sp2.add_argument("--write-threads", dest="write_threads", default="0,1,2,4")
+    sp2.add_argument("--write-batch-size", dest="batch_size", type=int, default=100)
+    sp2.add_argument("--duration", type=int, default=30)
+    sp2.add_argument("--cache", type=int, default=0)
+
     a = parser.parse_args()
-    {"sweep": cmd_sweep, "ablation": cmd_ablation,
-     "cache-sweep": cmd_cache_sweep, "thread-sweep": cmd_thread_sweep
+    {
+        "sweep": cmd_sweep, "ablation": cmd_ablation,
+        "cache-sweep": cmd_cache_sweep, "thread-sweep": cmd_thread_sweep,
+        "write-bench": cmd_write_bench, "stress-bench": cmd_stress_bench,
     }.get(a.command, lambda _: parser.print_help())(a)
 
 
