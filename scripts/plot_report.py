@@ -225,40 +225,70 @@ def fig_threads(thread_csv):
     print("  -> fig6-4_speedup.png")
 
 
-def fig_stress(stress_csv):
-    """Fig 6-5: Stress test time-series or boxplot."""
+def fig_write(write_csv):
+    """Fig 6-5: Write throughput per flush size."""
+    rows = _load_csv(write_csv)
+    labels = ["all" if int(_as_float(r["flush"])) == 0 else str(int(_as_float(r["flush"]))) for r in rows]
+    throughputs = [_as_float(r["throughput_vec_s"]) for r in rows]
+    times = [_as_float(r["time_s"]) for r in rows]
+    comps = [int(_as_float(r.get("compactions", 0))) for r in rows]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    x = np.arange(len(labels))
+    colors = ["#3498db", "#2ecc71", "#e74c3c"][:len(labels)]
+    bars = ax.bar(x, throughputs, 0.5, color=colors, edgecolor="white", linewidth=0.8)
+
+    for bar, v, t, c in zip(bars, throughputs, times, comps):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(throughputs) * 0.02,
+                f"{v:.0f} vec/s\n{t:.1f}s\n{c} compactions",
+                ha="center", fontsize=10, fontweight="bold")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"flush={l}" for l in labels])
+    ax.set_ylabel("Throughput (vec/s)")
+    ax.set_title("Fig 6-5: Write Throughput vs Flush Size")
+    ax.set_ylim(0, max(throughputs) * 1.25)
+
+    fig.savefig(OUT_DIR / "fig6-5_write.png"); plt.close(fig)
+    print("  -> fig6-5_write.png")
+
+
+def fig_stress_bench(stress_csv):
+    """Fig 6-6: Stress test summary panel."""
     rows = _load_csv(stress_csv)
-    # CSV columns: time,read_qps,p50_ms,p95_ms,p99_ms,write_ops,recall10,...
-    times = [_as_float(r.get("time"), i) for i, r in enumerate(rows)]
-    read_qps = [_as_float(r.get("read_qps")) for r in rows]
-    p95 = [_as_float(r.get("p95_ms")) for r in rows]
-    write_ops = [_as_float(r.get("write_ops")) for r in rows]
+    if not rows:
+        return
+    r = rows[0]
+    total_reads = int(_as_float(r["reads"]))
+    total_writes = int(_as_float(r["writes"]))
+    qps = _as_float(r["qps"])
+    p50 = _as_float(r["p50_ms"])
+    p95 = _as_float(r["p95_ms"])
+    p99 = _as_float(r["p99_ms"])
+    recall = _as_float(r["recall_10"])
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.axis("off")
 
-    ax1.plot(times, read_qps, "o-", color="#2ecc71", linewidth=1.5, markersize=3)
-    ax1.set_ylabel("Read QPS")
-    ax1.set_title("Fig 6-5: Mixed Read-Write Stress Test")
-    ax1.grid(True, alpha=0.3)
+    metrics = [
+        ("Total Reads", f"{total_reads:,}"),
+        ("Total Writes", f"{total_writes:,}"),
+        ("QPS", f"{qps:.1f}"),
+        ("Recall@10", f"{recall:.4f}"),
+        ("P50 Latency", f"{p50:.1f} ms"),
+        ("P95 Latency", f"{p95:.1f} ms"),
+        ("P99 Latency", f"{p99:.1f} ms"),
+    ]
 
-    ax2.plot(times, p95, "s-", color="#e74c3c", linewidth=1.5, markersize=3, label="P95 latency")
-    ax2.set_ylabel("P95 Latency (ms)", color="#e74c3c")
-    ax2.tick_params(axis="y", labelcolor="#e74c3c")
-    ax2.set_xlabel("Time (s)")
-    ax2.grid(True, alpha=0.3)
+    for i, (label, value) in enumerate(metrics):
+        y = 0.85 - i * 0.12
+        ax.text(0.5, y, f"{label}:  {value}", transform=ax.transAxes,
+                ha="center", fontsize=16,
+                fontweight="bold" if i < 4 else "normal")
 
-    ax3 = ax2.twinx()
-    ax3.plot(times, write_ops, "^-", color="#3498db", linewidth=1.5, markersize=3,
-             alpha=0.7, label="Write ops")
-    ax3.set_ylabel("Cumulative Write Ops", color="#3498db")
-    ax3.tick_params(axis="y", labelcolor="#3498db")
-
-    lines1, labels1 = ax2.get_legend_handles_labels()
-    lines2, labels2 = ax3.get_legend_handles_labels()
-    ax2.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
-
-    fig.savefig(OUT_DIR / "fig6-5_stress.png"); plt.close(fig)
-    print("  -> fig6-5_stress.png")
+    ax.set_title("Fig 6-6: Mixed Read-Write Stress Test (30s)", fontsize=14, y=0.98)
+    fig.savefig(OUT_DIR / "fig6-6_stress.png"); plt.close(fig)
+    print("  -> fig6-6_stress.png")
 
 
 def fig_scatter(sweep_csv):
@@ -316,7 +346,8 @@ def main():
     parser.add_argument("--ablation-csv", help="Path to ablation.csv")
     parser.add_argument("--cache-csv", help="Path to cache_sweep.csv")
     parser.add_argument("--thread-csv", help="Path to thread_sweep.csv")
-    parser.add_argument("--stress-csv", help="Path to stress.csv")
+    parser.add_argument("--write-csv", help="Path to write_bench.csv")
+    parser.add_argument("--stress-csv", help="Path to stress_bench.csv")
     a = parser.parse_args()
 
     generated = 0
@@ -333,8 +364,11 @@ def main():
     if a.thread_csv:
         fig_threads(a.thread_csv)
         generated += 1
+    if a.write_csv:
+        fig_write(a.write_csv)
+        generated += 1
     if a.stress_csv:
-        fig_stress(a.stress_csv)
+        fig_stress_bench(a.stress_csv)
         generated += 1
 
     if generated == 0:

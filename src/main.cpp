@@ -463,42 +463,44 @@ int CmdEval(const vindex::ArgParser& args) {
   std::vector<double> latencies_ms(queries_count, 0.0);
   vindex::SearchStats total_stats{};
   std::mutex result_mutex;
-  std::vector<std::future<void>> futures;
 
   auto t_start = std::chrono::high_resolution_clock::now();
 
-  for (size_t qi = 0; qi < queries_count; ++qi) {
-    auto task = [&, qi]() {
+  // Process queries in batches, one per thread. Each thread opens segment
+  // readers once and reuses them across all its queries.
+  auto process_batch = [&](size_t start, size_t end) {
+    // Open per-thread readers once.
+    std::vector<vindex::SegmentReader> thread_readers;
+    std::vector<vindex::GraphSearcher> thread_searchers;
+    for (const auto& info : seg_infos) {
+      vindex::SegmentReader reader;
+      if (cache) {
+        auto cached_io = std::make_unique<vindex::CachedIOBackend>(
+            vindex::MakeDefaultIOBackend(), cache.get());
+        if (!reader.OpenWithIO(info.path, info.id_offset, std::move(cached_io))) continue;
+      } else {
+        if (!reader.Open(info.path, info.id_offset)) continue;
+      }
+      thread_readers.push_back(std::move(reader));
+      thread_searchers.emplace_back(thread_readers.back());
+      if (prefetch) {
+        thread_searchers.back().SetPrefetchScheduler(prefetch.get());
+      }
+    }
+
+    for (size_t qi = start; qi < end; ++qi) {
       auto t0 = std::chrono::high_resolution_clock::now();
 
       vindex::TopK merged(params.top_k);
       vindex::SearchStats local_stats;
-      for (const auto& info : seg_infos) {
-        vindex::SegmentReader reader;
-        if (cache) {
-          auto cached_io = std::make_unique<vindex::CachedIOBackend>(
-              vindex::MakeDefaultIOBackend(), cache.get());
-          if (!reader.OpenWithIO(info.path, info.id_offset, std::move(cached_io))) {
-            continue;
-          }
-        } else {
-          if (!reader.Open(info.path, info.id_offset)) {
-            continue;
-          }
-        }
-        vindex::GraphSearcher searcher(reader);
-        if (prefetch) {
-          searcher.SetPrefetchScheduler(prefetch.get());
-        }
+      for (size_t si = 0; si < thread_readers.size(); ++si) {
         vindex::SearchStats seg_stats;
-        auto results = searcher.Search(queries.vector_at(qi), queries.dim, params, &seg_stats);
+        auto results = thread_searchers[si].Search(queries.vector_at(qi), queries.dim, params, &seg_stats);
         local_stats.visited += seg_stats.visited;
         local_stats.pq_distances += seg_stats.pq_distances;
         local_stats.exact_reads += seg_stats.exact_reads;
         local_stats.prefetch_hits += seg_stats.prefetch_hits;
-        for (const auto& r : results) {
-          merged.Add(r);
-        }
+        for (const auto& r : results) merged.Add(r);
       }
 
       auto t1 = std::chrono::high_resolution_clock::now();
@@ -508,7 +510,6 @@ int CmdEval(const vindex::ArgParser& args) {
       const int32_t* gt = groundtruth.vector_at(qi);
       uint32_t gt_count = std::min(groundtruth.dim, kEvalTopK);
 
-      // Compute recall at multiple K.
       auto recall_at_k = [&](uint32_t k) -> double {
         if (k == 0 || k > search_results.size()) return 0.0;
         std::unordered_set<int32_t> gt_set;
@@ -535,16 +536,24 @@ int CmdEval(const vindex::ArgParser& args) {
         total_stats.exact_reads += local_stats.exact_reads;
         total_stats.prefetch_hits += local_stats.prefetch_hits;
       }
-    };
-
-    if (pool) {
-      futures.push_back(pool->Submit(task));
-    } else {
-      futures.push_back(std::async(std::launch::deferred, task));
     }
-  }
+  };
 
-  for (auto& f : futures) f.get();
+  if (pool) {
+    size_t batch = (queries_count + num_threads - 1) / num_threads;
+    std::vector<std::future<void>> futures;
+    for (size_t t = 0; t < num_threads; ++t) {
+      size_t start = t * batch;
+      size_t end = std::min(start + batch, queries_count);
+      if (start >= end) break;
+      futures.push_back(pool->Submit([&process_batch, start, end] {
+        process_batch(start, end);
+      }));
+    }
+    for (auto& f : futures) f.get();
+  } else {
+    process_batch(0, queries_count);
+  }
 
   auto t_end = std::chrono::high_resolution_clock::now();
   double total_sec = std::chrono::duration<double>(t_end - t_start).count();
@@ -710,6 +719,7 @@ int CmdInsert(const vindex::ArgParser& args) {
 
   uint64_t next_id = ComputeNextId(segments);
   size_t batch_index = 0;
+  std::string last_segment_path;
   vindex::MemTable buffer(input.dim);
 
   auto flush_buffer = [&](vindex::MemTable& memtable) -> bool {
@@ -743,7 +753,7 @@ int CmdInsert(const vindex::ArgParser& args) {
       return false;
     }
 
-    manifest.Add({segment_path, next_id, 0});
+    last_segment_path = segment_path;
     next_id += batch_count;
     ++batch_index;
     return true;
@@ -757,10 +767,15 @@ int CmdInsert(const vindex::ArgParser& args) {
   for (size_t i = 0; i < input.count(); ++i) {
     buffer.Add(input.vector_at(i));
     if (buffer.count() >= batch_limit) {
+      uint64_t seg_offset = next_id;
       if (!flush_buffer(buffer)) {
         return 1;
       }
-      if (!manifest.Save(out_manifest_path)) {
+      // Reload manifest to pick up compaction changes, then add our segment.
+      vindex::Manifest out_manifest;
+      out_manifest.Load(out_manifest_path);  // ok if first time (file missing)
+      out_manifest.Add({last_segment_path, seg_offset, 0});
+      if (!out_manifest.Save(out_manifest_path)) {
         std::cerr << "Failed to save manifest\n";
         return 1;
       }
@@ -769,11 +784,14 @@ int CmdInsert(const vindex::ArgParser& args) {
   }
 
   if (!buffer.empty()) {
+    uint64_t seg_offset = next_id;
     if (!flush_buffer(buffer)) {
       return 1;
     }
-    // Only save if we just flushed remaining data.
-    if (!manifest.Save(out_manifest_path)) {
+    vindex::Manifest out_manifest;
+    out_manifest.Load(out_manifest_path);
+    out_manifest.Add({last_segment_path, seg_offset, 0});
+    if (!out_manifest.Save(out_manifest_path)) {
       std::cerr << "Failed to save manifest\n";
       return 1;
     }
@@ -888,10 +906,6 @@ int CmdStress(const vindex::ArgParser& args) {
                             [](const auto& s) { return s.HasPQ(); });
   if (pq_it != initial_segments.end()) shared_codebook = &pq_it->codebook();
 
-  // Copy manifest for writer.
-  vindex::Manifest writer_manifest = manifest;
-  if (!writer_manifest.Load(manifest_path)) return 1;
-
   vindex::CompactionScheduler compactor(out_manifest_path, data_dir, dim);
   compactor.SetCallback([](const std::string& msg) {
     std::cout << "[compaction] " << msg << "\n";
@@ -941,8 +955,10 @@ int CmdStress(const vindex::ArgParser& args) {
 
         {
           std::lock_guard lk(manifest_mutex);
-          writer_manifest.Add({seg_path, base_id, 0});
-          writer_manifest.Save(out_manifest_path);
+          vindex::Manifest latest;
+          latest.Load(out_manifest_path);  // pick up compaction changes
+          latest.Add({seg_path, base_id, 0});
+          latest.Save(out_manifest_path);
         }
         ++batch_index;
         total_writes.fetch_add(batch_count);

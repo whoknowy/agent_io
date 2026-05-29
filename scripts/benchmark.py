@@ -251,73 +251,70 @@ def cmd_write_bench(args):
 # ---------------------------------------------------------------------------
 
 def cmd_stress_bench(args):
-    """Run stress test for different read/write ratios."""
+    """Run a single stress test and print key metrics."""
+    rt = int(args.read_threads.split(",")[0])
+    wt = int(args.write_threads.split(",")[0]) if args.write_threads else 0
+
+    label = f"r{rt}_w{wt}"
+    print(f"  {label} ...", end=" ", flush=True)
+
+    cmd = [str(VINDEX), "stress", "--dataset", args.dataset,
+           "--write-input", args.write_input,
+           "--read-threads", str(rt),
+           "--write-threads", str(wt),
+           "--write-batch-size", str(args.batch_size),
+           "--duration", str(args.duration)]
+    if args.cache > 0:
+        cmd += ["--cache", str(args.cache)]
+
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            cwd=str(PROJECT_ROOT), timeout=args.duration + 300)
+
+    # Extract summary from output.
+    total_reads = 0
+    total_writes = 0
+    avg_recall = 0.0
+    avg_qps = 0.0
+    p50 = 0.0
+    p95 = 0.0
+    p99 = 0.0
+    avg_visited = 0.0
+
+    for line in result.stdout.split("\n"):
+        line = line.strip()
+        if "Reads:" in line and "Writes:" in line:
+            # "Reads: 12345  Writes: 678  QPS: 411.5"
+            parts = line.split()
+            for j, p in enumerate(parts):
+                if p == "Reads:" and j + 1 < len(parts):
+                    total_reads = int(parts[j + 1])
+                elif p == "Writes:" and j + 1 < len(parts):
+                    total_writes = int(parts[j + 1])
+        elif "Recall@10:" in line:
+            avg_recall = float(line.split(":")[1].strip())
+        elif "Latency (ms):" in line and "avg=" in line:
+            # "Latency (ms): avg=4.22 p50=3.85 p95=6.92 p99=10.06"
+            for part in line.split():
+                if "p50=" in part:
+                    p50 = float(part.split("=")[1])
+                elif "p95=" in part:
+                    p95 = float(part.split("=")[1])
+                elif "p99=" in part:
+                    p99 = float(part.split("=")[1])
+
+    duration = args.duration
+    avg_qps = total_reads / duration if duration > 0 else 0
+
+    print(f"reads={total_reads} writes={total_writes} QPS={avg_qps:.1f} "
+          f"P50={p50:.1f}ms P95={p95:.1f}ms P99={p99:.1f}ms Recall@10={avg_recall:.4f}")
+
+    # Save summary CSV.
     out_path = _out_csv("stress_bench.csv")
-    readers = [int(x) for x in args.read_threads.split(",")]
-    writers = [int(x) for x in args.write_threads.split(",")]
-    if len(readers) != len(writers):
-        print("ERROR: --read-threads and --write-threads must have same length", file=sys.stderr)
-        return
-
-    rows = []
-    for rt, wt in zip(readers, writers):
-        label = f"r{rt}_w{wt}"
-        print(f"  {label} ...", end=" ", flush=True)
-
-        cmd = [str(VINDEX), "stress", "--dataset", args.dataset,
-               "--write-input", args.write_input,
-               "--read-threads", str(rt),
-               "--write-threads", str(wt),
-               "--write-batch-size", str(args.batch_size),
-               "--duration", str(args.duration)]
-        if args.cache > 0:
-            cmd += ["--cache", str(args.cache)]
-
-        result = subprocess.run(cmd, capture_output=True, text=True,
-                                cwd=str(PROJECT_ROOT), timeout=args.duration + 60)
-        summary_file = PROJECT_ROOT / "results" / f"stress_{label}.csv"
-        lines = [l for l in result.stdout.split("\n") if l.strip() and not l.startswith("[")]
-
-        # Parse monitor lines (CSV) and summary.
-        read_qps_list, p95_list, recall_list, cache_hit_list = [], [], [], []
-        with open(summary_file, "w") as f:
-            for line in lines:
-                if line.startswith("time,"):
-                    f.write(line + "\n")
-                    continue
-                if "Stress Summary" in line:
-                    break
-                parts = line.split(",")
-                if len(parts) >= 7:
-                    try:
-                        read_qps_list.append(float(parts[1]))
-                        p95_list.append(float(parts[3]))
-                        if len(parts) >= 8:
-                            recall_list.append(float(parts[6]))
-                        if len(parts) >= 9:
-                            cache_hit_list.append(float(parts[7]))
-                    except ValueError:
-                        continue
-
-        avg_qps = sum(read_qps_list) / len(read_qps_list) if read_qps_list else 0
-        avg_p95 = sum(p95_list) / len(p95_list) if p95_list else 0
-        avg_recall = sum(recall_list) / len(recall_list) if recall_list else 0
-        avg_cache = sum(cache_hit_list) / len(cache_hit_list) if cache_hit_list else 0
-
-        print(f"QPS={avg_qps:.1f} P95={avg_p95:.1f}ms Recall={avg_recall:.4f}")
-        rows.append({"config": label, "read_threads": rt, "write_threads": wt,
-                     "qps": round(avg_qps, 1), "p95_ms": round(avg_p95, 1),
-                     "recall_10": round(avg_recall, 4), "cache_hit": round(avg_cache, 4)})
-
-    _write_csv(rows, out_path,
-               ["config", "read_threads", "write_threads", "qps", "p95_ms", "recall_10", "cache_hit"])
-
-    # Summary table.
-    print(f"\n{'Config':>12} {'R':>3} {'W':>3} {'QPS':>8} {'P95ms':>8} {'Recall':>8} {'CacheHit':>8}")
-    print("-" * 55)
-    for r in rows:
-        print(f"{r['config']:>12} {r['read_threads']:>3} {r['write_threads']:>3} "
-              f"{r['qps']:>8.1f} {r['p95_ms']:>8.1f} {r['recall_10']:>8.4f} {r['cache_hit']:>8.3f}")
+    _write_csv([{"reads": total_reads, "writes": total_writes, "qps": round(avg_qps, 1),
+                 "p50_ms": round(p50, 1), "p95_ms": round(p95, 1), "p99_ms": round(p99, 1),
+                 "recall_10": round(avg_recall, 4)}],
+               out_path,
+               ["reads", "writes", "qps", "p50_ms", "p95_ms", "p99_ms", "recall_10"])
 
 
 # ---------------------------------------------------------------------------

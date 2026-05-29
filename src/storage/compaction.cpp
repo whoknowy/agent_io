@@ -72,9 +72,10 @@ void CompactionScheduler::WorkerLoop() {
 
     bool did_work = false;
 
-    // Group segments by level.
+    // Group segments by level (only segments in our output directory).
     std::map<uint32_t, std::vector<SegmentMeta>> by_level;
     for (const auto& seg : manifest.segments()) {
+      if (seg.path.rfind(data_dir_, 0) != 0) continue;  // skip original dataset segments
       by_level[seg.level].push_back(seg);
     }
 
@@ -187,18 +188,24 @@ bool CompactionScheduler::CompactLevel(uint32_t level, Manifest& manifest) {
     return false;
   }
 
-  // Update manifest: remove old segments, add new one.
+  // Reload manifest to pick up any segments added during graph build,
+  // then atomically swap source segments for the new compacted segment.
+  Manifest latest;
+  if (!latest.Load(manifest_path_)) {
+    return false;
+  }
+
   for (const auto& meta : source_metas) {
-    manifest.Remove(meta.path);
+    latest.Remove(meta.path);
   }
 
   SegmentMeta new_meta;
   new_meta.path = new_path;
   new_meta.id_offset = new_offset;
   new_meta.level = level + 1;
-  manifest.Add(new_meta);
+  latest.Add(new_meta);
 
-  if (!manifest.Save(manifest_path_)) {
+  if (!latest.Save(manifest_path_)) {
     return false;
   }
 
